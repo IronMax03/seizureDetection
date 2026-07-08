@@ -61,9 +61,9 @@ from Arch import Model
 N_FOLDS       = 10        # ten-fold cross-validation
 EPOCHS        = 150       # "A total of 150 epochs of training were run"
 BATCH_SIZE    = 3         # "a batch size of 3 is employed"
-LEARNING_RATE = 1e-3      # x   in eq. (1)
-MOMENTUM      = 0.3       # m   in eq. (1)/(2)
-WEIGHT_DECAY  = 0.7       # lambda (regularization) in eq. (1)
+LEARNING_RATE = 1e-3      # keep the paper's LR...
+MOMENTUM      = 0.9       # ...but 0.3 is too weak; 0.9 drives the small conv-layer grads
+WEIGHT_DECAY  = 1e-4      # NOT 0.7 — that maps to a ~1000x-too-strong L2 penalty in PyTorch
 VAL_FRACTION  = 0.30      # 30% of the 90% training portion -> validation
 NORMAL_CLASS  = 0         # index of the "normal" (negative) class
 RANDOM_SEED   = 123

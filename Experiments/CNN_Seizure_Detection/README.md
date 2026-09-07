@@ -36,6 +36,12 @@ file-naming sets **O**, **F**, **S**:
 
 The reimplementation accuracy is slightly higher than the original paper's, but lies inside the margin of error. This and the other metrics small differences is likely due to the framework differences (2026 PyTorch vs. 2018 MATLAB).
 
+<div align="center">
+
+  <img width="25%" alt="radioactive shielding simulation" src="graphs/Reproduction/Confusion_Matrix.png" /> 
+  <img width="60%" alt="mandelbrot_zoom1" src="graphs/Reproduction/Learning_Curve.png" />
+
+
 ## Citations
 
 **Method (paper reproduced):**

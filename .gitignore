@@ -3,6 +3,7 @@ wget-log
 physionet.org
 Bonn-EEG-Dataset-main
 siena-scalp-eeg-database-1.0.0
+npy_data
 *.npy
 *.zip
 

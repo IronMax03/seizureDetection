@@ -3,7 +3,7 @@ This directory contains the preprocessing scripts for the CHB-MIT Scalp EEG Data
 
 ### Export raw windows
 To export the windowed raw EEG data, as a `.npy` file, run each cell in `Reformating.ipynb`. As sanity check the `Seizure vs Non-Seizure Distribution` graph should be as follows:
-![Seizure vs Non-Seizure Distribution](./Seizure_vs_Non-Seizure_Distribution.png)
+![Seizure vs Non-Seizure Distribution](../../doc/visuals/Seizure_vs_Non-Seizure_Distribution.png)
 
 and the `describe()` function should return the following:
 ```

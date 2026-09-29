@@ -33,12 +33,9 @@ EEG datasets. The architecture and software interface are still evolving.
 |   |-- Artifact_Removal/              Wavelet and thresholding denoising tests
 |   |-- CHB-MIT_Formating/             CHB-MIT download and windowing pipeline
 |   |-- CNN_Seizure_Detection/         Acharya CNN reproduction
-|   |-- CNN_Seizure_Detection_improved/ CNN extension with FiLM conditioning
 |   |-- ECG_denoising/                 Separate ECG denoising exploration
 |   |-- Entropy_Based_Fetures/         Entropy estimators and classification
-|   `-- Reeb_graph_genus/              Exploratory topological signal analysis
 |-- src/                               Shared preprocessing and data exploration
-|   `-- siena-scalp-eeg-database-1.0.0/ Siena scalp EEG data
 |-- doc/visuals/                       Generated figures used by documentation
 `-- README.md                          Project overview
 ```

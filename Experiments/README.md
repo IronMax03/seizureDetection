@@ -14,19 +14,8 @@ results.
 | `CHB-MIT_Formating/` | Downloads and windows the CHB-MIT Scalp EEG Database for seizure/non-seizure analysis. | [README](CHB-MIT_Formating/README.md) |
 | `CNN_Seizure_Detection/` | Reproduces Acharya et al.'s 13-layer 1-D CNN on three Bonn EEG classes. | [README](CNN_Seizure_Detection/README.md) |
 | `Entropy_Based_Fetures/` | Evaluates Kolmogorov-Sinai, spectral, approximate, and Renyi entropy features with XGBoost on Bonn EEG. | [README](Entropy_Based_Fetures/README.md) |
-| `CNN_Seizure_Detection_improved/` | In-progress CNN extension using entropy features for FiLM conditioning and denoising preprocessing. | README pending |
+| `CNN_Seizure_Detection_improved/` | In-progress CNN extension using entropy features for FiLM conditioning and denoising preprocessing. | [README](CNN_Seizure_Detection_improved/README.md) |
 | `ECG_denoising/` | Separate exploratory work on ECG denoising and a small CNN model. | README pending |
-
-## Suggested reading order
-
-1. Read the [Acharya CNN reproduction](CNN_Seizure_Detection/README.md) to see
-   the baseline classification task and Bonn label mapping.
-2. Read [Entropy Based Features](Entropy_Based_Fetures/README.md) for the
-   conditioning features used by the improved architecture.
-3. Read [Artifact Removal](Artifact_Removal/README.md) for the denoising
-   experiments used as preprocessing candidates.
-4. Read [CHB-MIT Preprocessing](CHB-MIT_Formating/README.md) for the current
-   path toward a larger clinical dataset.
 
 ## How the experiments fit together
 
@@ -34,13 +23,10 @@ results.
 Bonn EEG
    ├── baseline 13-layer CNN
    └── entropy feature evaluation
-
 EEGdenoiseNet
    └── artifact-removal method comparison
-
 Entropy features + artifact removal
    └── improved CNN with FiLM conditioning
-
 CHB-MIT EEG
    └── preprocessing and integration in progress
 ```

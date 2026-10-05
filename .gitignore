@@ -1,3 +1,10 @@
+# Latex compilation
+*.aux
+*.fls
+*.log
+*.gz
+*.fdb_latexmk
+
 # ignore databases
 wget-log
 physionet.org

@@ -52,9 +52,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 # ---------------------------------------------------------------------------
 # Model registry – add new architectures here (one line each).
 # ---------------------------------------------------------------------------
-from Architectures import FiCNN, FiCRNN  # noqa: E402
+from Architectures import FiCNN, FiCRNN, control  # noqa: E402
 
 MODEL_REGISTRY = {
+    "control":  control,
     "ficnn":  FiCNN,
     "ficrnn": FiCRNN,
 }
@@ -228,7 +229,12 @@ def build_patient_cache(kind, patient, src, cache_dir, workers):
 def load_labels(data_dir, patients, n_windows):
     ys, gs = [], []
     for k, (p, n) in enumerate(zip(patients, n_windows)):
-        yk = np.load(Path(data_dir) / p / "y.npy").astype(np.int64).ravel()
+        yk = np.load(Path(data_dir) / p / "y.npy").astype(np.int64)
+        if yk.ndim == 2:                      # per-channel labels (N, C)
+            if yk.shape[0] != n:
+                raise SystemExit(f"{p}: y.npy has {yk.shape[0]} rows but X.npy has {n} windows")
+            yk = yk.max(axis=1)               # window is seizure if any channel is
+        yk = yk.ravel()
         if len(yk) != n:
             raise SystemExit(f"{p}: y.npy has {len(yk)} labels but X.npy has {n} windows")
         ys.append(yk)

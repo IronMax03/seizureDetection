@@ -21,9 +21,10 @@ class FiLMBlock(nn.Module):
         return self.pool(h)
 
 
+
 # First architecture: FiLM CNN, with a FiLM generator that takes extra features as input.
 class FiCNN(nn.Module):
-    def __init__(self, extra_features=0, n_classes=2):
+    def __init__(self, extra_features=23, n_classes=23):
         super().__init__()
         self.channels = [18, 15, 10, 10, 10]
         kernels = [6, 5, 4, 4, 4]
@@ -81,6 +82,11 @@ class FiCNN(nn.Module):
 
         z = self.flatten(z)
         return self.classifier(z)
+
+
+class control(FiCNN):
+    def __init__(self, n_classes=2):
+        super().__init__(extra_features=1, n_classes=n_classes)
 
 
 class FiCRNN(nn.Module):

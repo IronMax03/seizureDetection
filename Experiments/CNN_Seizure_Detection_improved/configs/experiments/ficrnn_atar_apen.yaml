@@ -1,0 +1,19 @@
+# Experiment: FiLM-CRNN conditioned on ApEn features, ATAR-denoised EEG
+# Also demonstrates the full tune: block — copy-paste this as a template.
+model: ficrnn
+preprocess: atar
+features: apen
+
+# Optional: override base hyperparams for this specific experiment
+# epochs: 40
+# folds: 5
+
+# Optional: quick hyperparameter search triggered by --tune
+tune:
+  n_trials: 8        # number of random configs to evaluate
+  n_folds: 1         # folds per trial (1 = fast signal, uses the first patient fold)
+  n_epochs: 10       # epochs per trial
+  search:
+    lr: [1.0e-4, 5.0e-4, 1.0e-3, 3.0e-3]
+    weight_decay: [0.0, 1.0e-4, 1.0e-3]
+    batch_size: [128, 256, 512]

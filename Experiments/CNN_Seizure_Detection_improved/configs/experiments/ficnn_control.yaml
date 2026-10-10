@@ -1,0 +1,4 @@
+# Experiment: FiLM-CNN without conditioning (control), raw EEG
+model: ficnn
+preprocess: raw
+features: none

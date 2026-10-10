@@ -1,0 +1,24 @@
+# Default training configuration for train_gpu.py
+# Copy this file to create experiment-specific configs and pass with --config.
+# CLI flags (--lr, --epochs, etc.) override any value set here.
+#
+# folds         : number of patient-stratified folds (StratifiedGroupKFold)
+# power         : class-weight exponent 1=inv-freq 0.5=sqrt 0=none
+# data_on       : where EEG windows live (auto | gpu | ram)
+# workers       : null = os.cpu_count()-1; set an int to override
+folds: 10
+seed: 123
+epochs: 30
+batch_size: 256
+eval_batch_size: 4096
+lr: 0.0003
+weight_decay: 0.0001
+clip: 1.0
+power: 0.5
+patience: 0
+data_on: auto
+workers: null
+fs: 256.0
+class_names:
+- normal
+- seizure

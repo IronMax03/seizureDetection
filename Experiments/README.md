@@ -15,7 +15,7 @@ results.
 | `CNN_Seizure_Detection/` | Reproduces Acharya et al.'s 13-layer 1-D CNN on three Bonn EEG classes. | [README](CNN_Seizure_Detection/README.md) |
 | `Entropy_Based_Fetures/` | Evaluates Kolmogorov-Sinai, spectral, approximate, and Renyi entropy features with XGBoost on Bonn EEG. | [README](Entropy_Based_Fetures/README.md) |
 | `CNN_Seizure_Detection_improved/` | In-progress CNN extension using entropy features for FiLM conditioning and denoising preprocessing. | [README](CNN_Seizure_Detection_improved/README.md) |
-| `ECG_denoising/` | Separate exploratory work on ECG denoising and a small CNN model. | README pending |
+| `ECG_denoising/` | Separate exploratory work on signal denoising of a simulated ECG signal.  | README pending |
 
 ## How the experiments fit together
 

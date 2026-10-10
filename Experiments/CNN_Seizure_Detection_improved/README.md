@@ -154,6 +154,7 @@ configs/default_training_config.yaml      ← base hyperparams (lr, wd, epochs, 
 | `seed` | 123 | Random seed |
 | `workers` | cpu_count−1 | Parallel workers for cache building |
 | `fs` | 256.0 | Sampling rate Hz (used for FP/hour reporting only) |
+| `data_fraction` | `1.0` | Fraction of windows to keep per patient (stratified by class). Useful values: `0.75`, `0.5`, `0.25`, `0.1` |
 | `data_dir` | `../CHB-MIT_Formating/npy_data` | Path to the folder containing per-patient `X.npy`/`y.npy` |
 | `cache_dir` | `cache` | Directory for preprocessed caches |
 | `out_dir` | `results` | Root directory for run outputs |

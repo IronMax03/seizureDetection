@@ -236,6 +236,28 @@ def load_labels(data_dir, patients, n_windows):
     return np.concatenate(ys), np.concatenate(gs)
 
 
+def subsample_windows(y, groups, fraction, seed):
+    """
+    Stratified subsample of windows, preserving class balance within each patient.
+    Returns a sorted flat index array into the original N_total-length arrays.
+    fraction=1.0 returns all indices unchanged.
+    """
+    if fraction >= 1.0:
+        return np.arange(len(y))
+    rng = np.random.default_rng(seed)
+    idx = []
+    for patient_id in np.unique(groups):
+        pat_idx = np.where(groups == patient_id)[0]
+        pat_y   = y[pat_idx]
+        chosen  = []
+        for cls in np.unique(pat_y):
+            cls_idx = pat_idx[pat_y == cls]
+            n_keep  = max(1, round(len(cls_idx) * fraction))
+            chosen.append(rng.choice(cls_idx, size=n_keep, replace=False))
+        idx.append(np.concatenate(chosen))
+    return np.sort(np.concatenate(idx))
+
+
 def ram_available():
     try:
         with open("/proc/meminfo") as f:
@@ -418,8 +440,8 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, device, n_feat, K,
     class_w = (counts.sum() / (K * counts.clamp(min=1))) ** cfg["power"]
 
     if f_all is not None:
-        mu    = f_all[tr_d].mean(0, keepdim=True)
-        sd    = f_all[tr_d].std(0, keepdim=True) + 1e-8
+        mu     = f_all[tr_d].mean(0, keepdim=True)
+        sd     = f_all[tr_d].std(0, keepdim=True) + 1e-8
         f_norm = (f_all - mu) / sd
     else:
         f_norm = None
@@ -427,7 +449,7 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, device, n_feat, K,
     model = ModelCls(extra_features=n_feat, n_classes=K).to(device)
     opt   = torch.optim.AdamW(model.parameters(),
                               lr=cfg["lr"], weight_decay=cfg["weight_decay"])
-    bs        = cfg["batch_size"]
+    bs         = cfg["batch_size"]
     best_auprc = -1.0
 
     for epoch in range(n_epochs):
@@ -476,12 +498,11 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
 
     K   = int(y.max()) + 1
     pos = K - 1
-    y_dev = torch.as_tensor(y, dtype=torch.long, device=device)
-    f_dev = None if feats is None else torch.as_tensor(feats, dtype=torch.float32, device=device)
+    y_dev  = torch.as_tensor(y, dtype=torch.long, device=device)
+    f_dev  = None if feats is None else torch.as_tensor(feats, dtype=torch.float32, device=device)
     n_feat = 0 if feats is None else feats.shape[1]
 
-    all_splits = make_splits(y, groups, max(cfg_dict["folds"], n_folds + 1), cfg_dict["seed"])
-    # use the first n_folds splits for speed
+    all_splits  = make_splits(y, groups, max(cfg_dict["folds"], n_folds + 1), cfg_dict["seed"])
     tune_splits = all_splits[:n_folds]
 
     rng     = random.Random(cfg_dict["seed"])
@@ -491,7 +512,7 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
     log(f"[tune] search space: { {k: v for k, v in search.items()} }")
 
     for trial in range(n_trials):
-        trial_cfg = dict(cfg_dict)  # shallow copy, scalars only
+        trial_cfg = dict(cfg_dict)
         for param, choices in search.items():
             trial_cfg[param] = rng.choice(choices)
 
@@ -510,7 +531,6 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
     best = max(results, key=lambda r: r["auprc"])
     log(f"[tune] best trial {best['trial']}: {best['params']}  AUPRC {best['auprc']:.4f}")
 
-    # inject winning params into the live config
     for param, val in best["params"].items():
         cfg_dict[param] = val
 
@@ -728,13 +748,11 @@ def load_cfg(exp_name, cli_overrides: dict) -> dict:
           <- cli_overrides              (anything explicitly passed on the command line)
     The 'tune' block is extracted and returned separately.
     """
-    # 1. base
     if not _DEFAULT_CFG.exists():
         raise SystemExit(f"Base config not found: {_DEFAULT_CFG}")
     with _DEFAULT_CFG.open() as f:
         cfg = yaml.safe_load(f) or {}
 
-    # 2. experiment yaml
     exp_path = _EXP_DIR / f"{exp_name}.yaml"
     if not exp_path.exists():
         available = _available_experiments()
@@ -752,16 +770,13 @@ def load_cfg(exp_name, cli_overrides: dict) -> dict:
 
     cfg.update(exp)
 
-    # 3. CLI overrides (None = not provided, skip)
     for k, v in cli_overrides.items():
         if v is not None:
             cfg[k] = v
 
-    # workers default
     if cfg.get("workers") is None:
         cfg["workers"] = max(1, (os.cpu_count() or 2) - 1)
 
-    # required fields
     for required in ("model", "preprocess", "features"):
         if required not in cfg:
             raise SystemExit(f"Experiment yaml '{exp_name}' must define '{required}'.")
@@ -875,8 +890,18 @@ def main():
         raise SystemExit(f"patients have different window shapes: "
                          f"{dict(zip(patients, shapes))}")
 
-    y, groups = load_labels(data_dir, patients, [s[0] for s in shapes])
+    y_full, groups_full = load_labels(data_dir, patients, [s[0] for s in shapes])
     cfg["window_len"] = int(shapes[0][2])
+
+    # optional stratified subsample (preserves class balance within each patient)
+    fraction = float(cfg.get("data_fraction", 1.0))
+    if fraction < 1.0:
+        keep      = subsample_windows(y_full, groups_full, fraction, cfg["seed"])
+        y, groups = y_full[keep], groups_full[keep]
+        log(f"data_fraction={fraction}: {len(keep)}/{len(y_full)} windows kept "
+            f"(stratified per patient)")
+    else:
+        keep, y, groups = None, y_full, groups_full
 
     log(f"data: {len(y)} windows | seizure {int((y == y.max()).sum())} "
         f"({100 * (y == y.max()).mean():.2f}%) | "
@@ -890,10 +915,19 @@ def main():
                 for p, s in zip(patients, srcs)]
 
     eeg_parts = parts(cfg["preprocess"])
-    apen      = np.concatenate([np.asarray(a) for a in parts("apen")]) \
+    apen_raw  = np.concatenate([np.asarray(a) for a in parts("apen")]) \
                 if cfg["features"] == "apen" else None
 
-    store = WindowStore(eeg_parts, device, f"{cfg['preprocess']} EEG",
+    if keep is not None:
+        # extract per-patient local indices so WindowStore sees contiguous sub-arrays
+        offsets     = np.concatenate([[0], np.cumsum([s[0] for s in shapes])])
+        store_parts = [np.asarray(eeg_parts[k])[keep[groups_full[keep] == k] - offsets[k]]
+                       for k in range(len(patients))]
+        apen        = apen_raw[keep] if apen_raw is not None else None
+    else:
+        store_parts, apen = eeg_parts, apen_raw
+
+    store = WindowStore(store_parts, device, f"{cfg['preprocess']} EEG",
                         cfg["data_on"], cfg["eval_batch_size"])
 
     if device.type == "cuda":

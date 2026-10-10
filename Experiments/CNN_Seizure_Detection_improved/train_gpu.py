@@ -4,13 +4,16 @@ Seizure detection on CHB-MIT: FiLM-CNN conditioned on per-channel entropy featur
 GPU-resident, memory-aware version of Notebook.ipynb.
 
 Pipeline
+  0. Check : every X.npy is checked against its header first; truncated files stop with a
+             clear message instead of crashing with a bus error. Disk space is checked
+             before any cache is written.
   1. EEG   : X.npy of each patient is read memory-mapped, converted to uV float16 and
-             cached to disk (cache/X_uV_f16_<patients>.npy). Peak RAM ~ one chunk.
-  2. ApEn  : utils.APEN on every (window, channel), computed in parallel, cached to disk
-             (cache/APEN_<patients>.npy). Computed once, reused on every later run.
-  3. Train : whole dataset on the GPU as float16 (~4.8 GB for 410k windows), batches are
-             sliced on the GPU (no DataLoader), class-weighted loss, AdamW, grad clipping,
-             best-epoch checkpoint by validation AUPRC.
+             cached per patient (cache/raw/<patient>.npy). Peak RAM ~ one chunk.
+  2. ApEn  : utils.APEN on every (window, channel), in parallel, cached per patient
+             (cache/apen/<patient>.npy). Each patient is computed once, for any combination.
+  3. Train : all windows on the GPU as float16 when they fit (~11.8 KB per window), else in
+             CPU RAM with batches streamed to the GPU. Class-weighted loss, AdamW, grad
+             clipping, best-epoch checkpoint by validation AUPRC.
   4. Output: results/<experiment>/  -> summary.json, history.json, summary.png, fold*.pt
 
 Usage
@@ -26,6 +29,7 @@ import argparse
 import copy
 import json
 import os
+import shutil
 import time
 from multiprocessing import Pool
 from pathlib import Path
@@ -55,80 +59,71 @@ def log(msg):
 
 
 # =============================================================================
-# 1. Data: memory-mapped loading + on-disk caches
+# 1. Data: validated memory-mapped inputs + per-patient on-disk caches
+#    cache/raw/<patient>.npy   (N, C, T) float16 uV
+#    cache/atar/<patient>.npy  (N, C, T) float16 uV, ATAR-denoised
+#    cache/apen/<patient>.npy  (N, C)    float32
+#    Each patient is built once and reused by every patient combination.
 # =============================================================================
-def patient_paths(data_dir, patients):
-    return [(p, Path(data_dir) / p / "X.npy", Path(data_dir) / p / "y.npy") for p in patients]
+def npy_info(path):
+    """(shape, dtype, expected_bytes, actual_bytes) read from the .npy header only."""
+    with open(path, "rb") as f:
+        version = np.lib.format.read_magic(f)
+        readers = {(1, 0): np.lib.format.read_array_header_1_0,
+                   (2, 0): np.lib.format.read_array_header_2_0}
+        if version in readers:
+            shape, _, dtype = readers[version](f)
+        else:
+            shape, _, dtype = np.lib.format._read_array_header(f, version)  # noqa: SLF001
+        offset = f.tell()
+    expected = offset + int(np.prod(shape)) * dtype.itemsize
+    return shape, dtype, expected, os.path.getsize(path)
+
+
+def check_input_npy(path):
+    """Refuse truncated inputs: reading past the end of a memory-mapped file = 'bus error'."""
+    shape, dtype, expected, actual = npy_info(path)
+    if dtype.hasobject:
+        raise SystemExit(f"{path}: object array, cannot be memory-mapped")
+    if actual < expected:
+        raise SystemExit(
+            f"{path} is truncated: {actual / 1e9:.2f} GB on disk but its header describes "
+            f"{expected / 1e9:.2f} GB (shape {shape}, {dtype}).\n"
+            f"Re-copy or re-export this patient. Memory-mapping a truncated file is what "
+            f"causes a 'bus error'.")
+    return shape
+
+
+def cache_ok(cache, src):
+    if not cache.exists() or cache.stat().st_mtime < Path(src).stat().st_mtime:
+        return False                                  # missing, or the source was re-exported
+    _, _, expected, actual = npy_info(cache)
+    return actual >= expected
+
+
+def ensure_space(directory, need_bytes, what):
+    free = shutil.disk_usage(directory).free
+    if need_bytes + 2 * 2**30 > free:
+        raise SystemExit(
+            f"not enough disk space for {what}: needs {need_bytes / 2**30:.1f} GB (+2 GB margin), "
+            f"only {free / 2**30:.1f} GB free in {Path(directory).resolve()}.\n"
+            f"Delete old combined caches (cache/*.npy from earlier versions of this script) "
+            f"or point --cache-dir to a bigger disk.")
 
 
 def _to_uv_f16(block, scale=1e6):
     uv = np.asarray(block, dtype=np.float32) * scale            # volts -> uV BEFORE float16
-    n_clip = int(np.count_nonzero(np.abs(uv) > F16_MAX))
+    bad = ~np.isfinite(uv)                                       # NaN/inf (e.g. from ATAR) -> 0
+    if bad.any():
+        uv[bad] = 0.0
+    n_clip = int(np.count_nonzero(np.abs(uv) > F16_MAX)) + int(bad.sum())
     return np.clip(uv, -F16_MAX, F16_MAX).astype(np.float16), n_clip
 
 
-def build_eeg_cache(data_dir, patients, cache_dir, transform=None, tag="raw"):
-    """Write all patients' windows into one uV float16 .npy on disk.
-    Returns (X memmap (N,C,T) f16, y (N,) int64, groups (N,) int16 patient index)."""
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    key = "_".join(patients)
-    x_path = cache_dir / f"X_uV_f16_{tag}_{key}.npy"
-    y_path = cache_dir / f"y_{key}.npy"
-    g_path = cache_dir / f"groups_{key}.npy"
-
-    files = patient_paths(data_dir, patients)
-
-    if not (y_path.exists() and g_path.exists()):
-        ys, gs = [], []
-        for k, (p, _, yf) in enumerate(files):
-            yk = np.load(yf).astype(np.int64)
-            ys.append(yk)
-            gs.append(np.full(len(yk), k, dtype=np.int16))
-        np.save(y_path, np.concatenate(ys))
-        np.save(g_path, np.concatenate(gs))
-
-    if not x_path.exists():
-        shapes = [np.load(xf, mmap_mode="r").shape for _, xf, _ in files]
-        N = sum(s[0] for s in shapes)
-        C, T = shapes[0][1:]
-        assert all(s[1:] == (C, T) for s in shapes), f"inconsistent window shapes: {shapes}"
-        log(f"building EEG cache [{tag}] {N} x {C} x {T} -> {x_path.name} "
-            f"({N * C * T * 2 / 1e9:.1f} GB)")
-        tmp = x_path.with_name(x_path.stem + ".tmp.npy")
-        X = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float16, shape=(N, C, T))
-        i, clipped = 0, 0
-        for (p, xf, _), shp in zip(files, shapes):
-            src = np.load(xf, mmap_mode="r")
-            for s in range(0, len(src), CHUNK):
-                blk = np.asarray(src[s:s + CHUNK], dtype=np.float64)
-                if transform is not None:
-                    out = transform(blk)
-                    assert out.shape == blk.shape, \
-                        f"transform changed shape {blk.shape} -> {out.shape}"
-                    blk = out
-                X[i + s:i + s + len(blk)], n_clip = _to_uv_f16(blk)
-                clipped += n_clip
-            i += len(src)
-            log(f"  {p}: {len(src)} windows")
-        X.flush()
-        del X
-        os.replace(tmp, x_path)
-        if clipped:
-            log(f"  warning: {clipped} samples exceeded +/-{F16_MAX:.0f} uV and were clipped")
-
-    X = np.load(x_path, mmap_mode="r")
-    y = np.load(y_path)
-    groups = np.load(g_path)
-    assert len(X) == len(y) == len(groups)
-    return X, y, groups
-
-
-# ---- ApEn features: parallel, chunked, cached -------------------------------
 _SRC = None
 
 
-def _apen_init(x_paths):
+def _worker_init(x_paths):
     global _SRC
     _SRC = [np.load(p, mmap_mode="r") for p in x_paths]
 
@@ -141,43 +136,7 @@ def _apen_job(job):
     for i in range(blk.shape[0]):
         for c in range(blk.shape[1]):
             out[i, c] = APEN(blk[i, c])
-    return k, start, out
-
-
-def build_apen_cache(data_dir, patients, cache_dir, workers):
-    cache_dir = Path(cache_dir)
-    path = cache_dir / f"APEN_{'_'.join(patients)}.npy"
-    if path.exists():
-        return np.load(path)
-
-    files = patient_paths(data_dir, patients)
-    x_paths = [str(xf) for _, xf, _ in files]
-    lens = [np.load(p, mmap_mode="r").shape for p in x_paths]
-    offsets = np.concatenate([[0], np.cumsum([s[0] for s in lens])])
-    N, C = int(offsets[-1]), lens[0][1]
-    feats = np.full((N, C), np.nan, dtype=np.float32)          # 38 MB for 410k x 23
-
-    step = 2_000
-    jobs = [(k, s, min(s + step, lens[k][0]))
-            for k in range(len(x_paths)) for s in range(0, lens[k][0], step)]
-    log(f"computing ApEn for {N} windows x {C} channels on {workers} processes "
-        f"(cached afterwards in {path.name})")
-    t0, done = time.time(), 0
-    with Pool(workers, initializer=_apen_init, initargs=(x_paths,)) as pool:
-        for k, start, out in pool.imap_unordered(_apen_job, jobs):
-            feats[offsets[k] + start: offsets[k] + start + len(out)] = out
-            done += len(out)
-            if done % (step * 20) < step or done == N:
-                el = time.time() - t0
-                log(f"  ApEn {done}/{N} ({100 * done / N:.0f}%) "
-                    f"| eta {el / done * (N - done) / 60:.1f} min")
-    bad = ~np.isfinite(feats)
-    if bad.any():
-        log(f"  {bad.sum()} non-finite ApEn values -> replaced by column median")
-        med = np.nanmedian(np.where(bad, np.nan, feats), axis=0)
-        feats[bad] = np.take(med, np.where(bad)[1])
-    np.save(path, feats)
-    return feats
+    return k, start, out, 0
 
 
 def _atar_job(job):
@@ -197,40 +156,164 @@ def _atar_job(job):
     return k, start, uv, n_clip
 
 
-def build_denoised_cache(data_dir, patients, cache_dir, workers):
-    """ATAR-denoise every (window, channel) in parallel; cache as uV float16 on disk."""
-    cache_dir = Path(cache_dir)
-    key = "_".join(patients)
-    path = cache_dir / f"X_uV_f16_atar_{key}.npy"
-    if not path.exists():
-        files = patient_paths(data_dir, patients)
-        x_paths = [str(xf) for _, xf, _ in files]
-        shapes = [np.load(p, mmap_mode="r").shape for p in x_paths]
-        offsets = np.concatenate([[0], np.cumsum([s[0] for s in shapes])])
-        N, (C, T) = int(offsets[-1]), shapes[0][1:]
-        log(f"ATAR-denoising {N} windows x {C} channels on {workers} processes "
-            f"-> {path.name} ({N * C * T * 2 / 1e9:.1f} GB, cached afterwards)")
-        tmp = path.with_name(path.stem + ".tmp.npy")
-        X = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float16, shape=(N, C, T))
-        step = 1_000
-        jobs = [(k, s, min(s + step, shapes[k][0]))
-                for k in range(len(x_paths)) for s in range(0, shapes[k][0], step)]
-        t0, done, clipped = time.time(), 0, 0
-        with Pool(workers, initializer=_apen_init, initargs=(x_paths,)) as pool:
-            for k, start, uv, n_clip in pool.imap_unordered(_atar_job, jobs):
-                X[offsets[k] + start: offsets[k] + start + len(uv)] = uv
-                done += len(uv)
-                clipped += n_clip
-                if done % (step * 40) < step or done == N:
+def build_patient_cache(kind, patient, src, cache_dir, workers):
+    """kind = 'raw' | 'atar' -> (N, C, T) float16 uV memmap; 'apen' -> (N, C) float32."""
+    out_dir = Path(cache_dir) / kind
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{patient}.npy"
+    if cache_ok(path, src):
+        return np.load(path, mmap_mode="r")
+
+    N, C, T = check_input_npy(src)
+    dtype, shape = (np.float32, (N, C)) if kind == "apen" else (np.float16, (N, C, T))
+    need = int(np.prod(shape)) * np.dtype(dtype).itemsize
+    ensure_space(out_dir, need, f"the {kind} cache of {patient}")
+    log(f"building {kind} cache for {patient}: {N} windows -> {path} ({need / 2**30:.2f} GB)")
+
+    tmp = path.with_name(path.stem + ".tmp.npy")
+    out = np.lib.format.open_memmap(tmp, mode="w+", dtype=dtype, shape=shape)
+    t0, clipped = time.time(), 0
+    if kind == "raw":
+        src_mm = np.load(src, mmap_mode="r")
+        for s in range(0, N, CHUNK):
+            out[s:s + CHUNK], n = _to_uv_f16(src_mm[s:s + CHUNK])
+            clipped += n
+    else:
+        job_fn, step = (_apen_job, 2_000) if kind == "apen" else (_atar_job, 1_000)
+        jobs = [(0, s, min(s + step, N)) for s in range(0, N, step)]
+        done, next_log = 0, 0.1
+        with Pool(workers, initializer=_worker_init, initargs=([str(src)],)) as pool:
+            for _, start, arr, n in pool.imap_unordered(job_fn, jobs):
+                out[start:start + len(arr)] = arr
+                clipped += n
+                done += len(arr)
+                if done / N >= next_log or done == N:
                     el = time.time() - t0
-                    log(f"  ATAR {done}/{N} ({100 * done / N:.0f}%) "
+                    log(f"  {kind} {patient}: {100 * done / N:.0f}% "
                         f"| eta {el / done * (N - done) / 60:.1f} min")
-        X.flush()
-        del X
-        os.replace(tmp, path)
-        if clipped:
-            log(f"  warning: {clipped} samples exceeded +/-{F16_MAX:.0f} uV and were clipped")
+                    next_log += 0.1
+        if kind == "apen":
+            bad = ~np.isfinite(out)
+            if bad.any():
+                log(f"  {int(bad.sum())} non-finite ApEn values -> replaced by channel median")
+                med = np.nanmedian(np.where(bad, np.nan, out), axis=0)
+                out[bad] = np.take(med, np.where(bad)[1])
+    out.flush()
+    del out
+    os.replace(tmp, path)
+    if clipped:
+        log(f"  warning: {clipped} samples were NaN/inf (set to 0) or exceeded "
+            f"+/-{F16_MAX:.0f} uV (clipped)")
+    log(f"  {patient} {kind} done in {(time.time() - t0) / 60:.1f} min")
     return np.load(path, mmap_mode="r")
+
+
+def load_labels(data_dir, patients, n_windows):
+    ys, gs = [], []
+    for k, (p, n) in enumerate(zip(patients, n_windows)):
+        yk = np.load(Path(data_dir) / p / "y.npy").astype(np.int64).ravel()
+        if len(yk) != n:
+            raise SystemExit(f"{p}: y.npy has {len(yk)} labels but X.npy has {n} windows")
+        ys.append(yk)
+        gs.append(np.full(n, k, dtype=np.int16))
+    return np.concatenate(ys), np.concatenate(gs)
+
+
+def ram_available():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+class WindowStore:
+    """All windows as float16 (N, C, T): on the GPU when they fit, otherwise in CPU RAM
+    with each batch copied to the GPU (slower, but works for any number of patients)."""
+
+    def __init__(self, parts, device, name, mode="auto", max_batch=4096):
+        """mode: 'gpu' = all windows in VRAM (fastest), 'ram' = all windows in pinned CPU RAM,
+        only the current batch in VRAM (~3 MB per 256 windows), 'auto' = gpu if it fits."""
+        N = sum(len(p) for p in parts)
+        C, T = parts[0].shape[1:]
+        self.shape, self.device = (N, C, T), device
+        need = N * C * T * 2
+        cuda = device.type == "cuda"
+        if not cuda or mode == "ram":
+            self.on_gpu = False
+        elif mode == "gpu":
+            self.on_gpu = True
+        else:
+            free, _ = torch.cuda.mem_get_info()
+            self.on_gpu = need < free - 1.5 * 2**30
+            if not self.on_gpu:
+                log(f"{name}: {need / 2**30:.1f} GB does not fit in VRAM "
+                    f"({free / 2**30:.1f} GB free) -> kept in RAM, batches streamed to the GPU")
+        if not self.on_gpu:
+            avail = ram_available()
+            if avail is not None and need > avail - 2 * 2**30:
+                raise SystemExit(f"{name}: needs {need / 2**30:.1f} GB but only "
+                                 f"{avail / 2**30:.1f} GB RAM is available; use fewer patients")
+        self.streaming = cuda and not self.on_gpu
+        # indices live where the data lives, so gathering a batch never forces a GPU sync
+        self.index_device = device if self.on_gpu else torch.device("cpu")
+
+        pin = False
+        if self.on_gpu:
+            self.x = torch.empty(self.shape, dtype=torch.float16, device=device)
+        else:
+            if self.streaming:
+                try:                                  # pinned RAM -> fast, asynchronous copies
+                    self.x = torch.empty(self.shape, dtype=torch.float16, pin_memory=True)
+                    pin = True
+                except RuntimeError:
+                    log(f"{name}: could not pin {need / 2**30:.1f} GB, using pageable RAM")
+            if not pin:
+                self.x = torch.empty(self.shape, dtype=torch.float16)
+        i, n_bad = 0, 0
+        for p in parts:
+            for s in range(0, len(p), CHUNK):
+                arr = np.array(p[s:s + CHUNK])
+                bad = ~np.isfinite(arr)                   # also repairs caches built earlier
+                if bad.any():
+                    n_bad += int(bad.sum())
+                    arr[bad] = 0
+                self.x[i + s:i + s + len(arr)] = torch.from_numpy(arr).to(self.x.device)
+            i += len(p)
+        if n_bad:
+            log(f"{name}: warning: {n_bad} NaN/inf samples in the cache were set to 0")
+
+        if self.streaming:
+            # two pinned staging buffers: gather batch k+1 on the CPU while batch k is copied
+            self.buf = [torch.empty((max_batch, C, T), dtype=torch.float16, pin_memory=True)
+                        for _ in range(2)]
+            self.events = [None, None]
+            self.k = 0
+        log(f"{name}: {N} windows ({need / 2**30:.1f} GB) in "
+            f"{'VRAM' if self.on_gpu else ('pinned RAM, streamed' if pin else 'RAM')}")
+
+    def get(self, idx):
+        """idx on self.index_device -> float32 batch on the training device."""
+        if not self.streaming:
+            return self.x[idx].float()
+        n = len(idx)
+        if n > self.buf[0].shape[0]:
+            self.buf = [torch.empty((n,) + self.shape[1:], dtype=torch.float16, pin_memory=True)
+                        for _ in range(2)]
+            self.events = [None, None]
+        k, self.k = self.k, self.k ^ 1
+        if self.events[k] is not None:
+            self.events[k].synchronize()              # buffer k's previous copy has finished
+        buf = self.buf[k][:n]
+        torch.index_select(self.x, 0, idx, out=buf)
+        out = buf.to(self.device, non_blocking=True)
+        ev = torch.cuda.Event()
+        ev.record()
+        self.events[k] = ev
+        return out.float()
 
 
 # =============================================================================
@@ -331,41 +414,33 @@ def pick_device():
     return torch.device("cuda")
 
 
-def to_device_chunked(X, device):
-    """Copy an (N, C, T) float16 memmap to the device chunk by chunk."""
-    need = X.size * 2
-    if device.type == "cuda":
-        free, _ = torch.cuda.mem_get_info()
-        if need > free - 1.5 * 2**30:
-            raise SystemExit(f"dataset needs {need / 2**30:.1f} GB but only "
-                             f"{free / 2**30:.1f} GB VRAM is free; use fewer patients")
-    out = torch.empty(X.shape, dtype=torch.float16, device=device)
-    for s in range(0, len(X), CHUNK):
-        out[s:s + CHUNK] = torch.from_numpy(np.array(X[s:s + CHUNK])).to(device)
-    return out
-
-
 @torch.no_grad()
-def evaluate(model, x_dev, f_all, y_dev, idx, class_w, pos_class, bs):
+def evaluate(model, store, f_all, y_dev, idx, class_w, pos_class, bs):
     model.eval()
-    loss_sum = torch.zeros((), device=x_dev.device)
-    w_sum = torch.zeros((), device=x_dev.device)
+    loss_sum = torch.zeros((), device=y_dev.device)
+    w_sum = torch.zeros((), device=y_dev.device)
     outs = []
+    dev = y_dev.device
     for s in range(0, len(idx), bs):
         b = idx[s:s + bs]
-        out = model(x_dev[b].float(), None if f_all is None else f_all[b])
-        yb = y_dev[b]
+        bd = b.to(dev, non_blocking=True)
+        out = model(store.get(b), None if f_all is None else f_all[bd])
+        yb = y_dev[bd]
         loss_sum += F.cross_entropy(out, yb, weight=class_w, reduction="sum")
         w_sum += class_w[yb].sum()
         outs.append(out)
     out = torch.cat(outs)
     preds = out.argmax(1).cpu().numpy()
     probs = out.softmax(1)[:, pos_class].float().cpu().numpy()
-    labels = y_dev[idx].cpu().numpy()
+    labels = y_dev[idx.to(dev)].cpu().numpy()
     return (loss_sum / w_sum).item(), preds, labels, probs
 
 
 def fold_metrics(labels, preds, probs, pos_class):
+    if not np.isfinite(probs).all():
+        log(f"    warning: {int((~np.isfinite(probs)).sum())} non-finite predictions "
+            f"(the model weights became NaN) -> metrics set to NaN for this epoch")
+        return {"acc": float("nan"), "bacc": float("nan"), "auprc": float("nan")}
     has_pos = bool((labels == pos_class).any())
     return {
         "acc": float((preds == labels).mean()),
@@ -381,7 +456,7 @@ def make_splits(y, groups, split, n_splits, seed):
     return list(skf.split(np.zeros(len(y)), y))
 
 
-def train_cv(name, x_dev, feats, y, groups, args, device, out_dir, class_names):
+def train_cv(name, store, feats, y, groups, args, device, out_dir, class_names):
     """Cross-validated training. feats=None -> no conditioning (control)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -399,22 +474,23 @@ def train_cv(name, x_dev, feats, y, groups, args, device, out_dir, class_names):
 
     for fold, (tr, va) in enumerate(splits):
         t_fold = time.time()
-        tr_t = torch.as_tensor(tr, device=device)
-        va_t = torch.as_tensor(va, device=device)
+        tr_t = torch.as_tensor(tr, device=store.index_device)   # where the EEG lives
+        va_t = torch.as_tensor(va, device=store.index_device)
+        tr_d = torch.as_tensor(tr, device=device)                # for labels / features
 
-        counts = torch.bincount(y_dev[tr_t], minlength=K).float()
+        counts = torch.bincount(y_dev[tr_d], minlength=K).float()
         class_w = (counts.sum() / (K * counts.clamp(min=1))) ** args.power
 
         if f_dev is not None:
-            mu = f_dev[tr_t].mean(0, keepdim=True)
-            sd = f_dev[tr_t].std(0, keepdim=True) + 1e-8
+            mu = f_dev[tr_d].mean(0, keepdim=True)
+            sd = f_dev[tr_d].std(0, keepdim=True) + 1e-8
             f_all = (f_dev - mu) / sd
         else:
             f_all = None
 
         torch.manual_seed(args.seed + fold)           # same init across experiments
-        model = CNN(extra_features=n_feat, n_classes=K, n_eeg_ch=x_dev.shape[1],
-                    length=x_dev.shape[2]).to(device)
+        model = CNN(extra_features=n_feat, n_classes=K, n_eeg_ch=store.shape[1],
+                    length=store.shape[2]).to(device)
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
         log(f"[{name}] fold {fold + 1}/{n_folds} | train {len(tr)} (pos {int(counts[pos])}) "
@@ -427,22 +503,29 @@ def train_cv(name, x_dev, feats, y, groups, args, device, out_dir, class_names):
         for epoch in range(args.epochs):
             t_ep = time.time()
             model.train()
-            perm = tr_t[torch.randperm(len(tr_t), device=device)]
+            perm = tr_t[torch.randperm(len(tr_t), device=tr_t.device)]
             n_batches = len(perm) // bs                      # drop_last: BatchNorm-safe
             run = torch.zeros((), device=device)
+            n_skipped = 0
             for b in range(n_batches):
                 idx = perm[b * bs:(b + 1) * bs]
-                xs = x_dev[idx].float()
-                xf = None if f_all is None else f_all[idx]
-                loss = F.cross_entropy(model(xs, xf), y_dev[idx], weight=class_w)
+                idx_d = idx.to(device, non_blocking=True)    # no-op when data is in VRAM
+                xs = store.get(idx)
+                xf = None if f_all is None else f_all[idx_d]
+                loss = F.cross_entropy(model(xs, xf), y_dev[idx_d], weight=class_w)
+                if not torch.isfinite(loss):                 # never let one bad batch poison the weights
+                    n_skipped += 1
+                    continue
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
                 opt.step()
                 run += loss.detach()                         # no per-step GPU sync
-            hist["train_loss"].append((run / max(n_batches, 1)).item())
+            hist["train_loss"].append((run / max(n_batches - n_skipped, 1)).item())
+            if n_skipped:
+                log(f"    warning: skipped {n_skipped} batches with a non-finite loss")
 
-            vloss, preds, labels, probs = evaluate(model, x_dev, f_all, y_dev, va_t,
+            vloss, preds, labels, probs = evaluate(model, store, f_all, y_dev, va_t,
                                                    class_w, pos, args.eval_batch_size)
             m = fold_metrics(labels, preds, probs, pos)
             hist["val_loss"].append(vloss)
@@ -450,8 +533,8 @@ def train_cv(name, x_dev, feats, y, groups, args, device, out_dir, class_names):
             hist["val_bacc"].append(m["bacc"])
             hist["val_auprc"].append(m["auprc"])
 
-            score = m["auprc"] if np.isfinite(m["auprc"]) else m["bacc"]
-            if score > best["auprc"]:
+            score = next((v for v in (m["auprc"], m["bacc"]) if np.isfinite(v)), -np.inf)
+            if best["epoch"] < 0 or score > best["auprc"]:
                 best = {"auprc": score, "epoch": epoch, "preds": preds, "labels": labels,
                         "state": copy.deepcopy(model.state_dict())}
 
@@ -583,6 +666,9 @@ def parse_args():
     p.add_argument("--power", type=float, default=0.5,
                    help="class-weight exponent: 1 = inverse frequency, 0.5 = sqrt, 0 = none")
     p.add_argument("--patience", type=int, default=0, help="early stopping on AUPRC (0 = off)")
+    p.add_argument("--data-on", default="auto", choices=["auto", "gpu", "ram"],
+                   help="where the EEG windows live: gpu = all in VRAM (fastest), ram = in "
+                        "pinned RAM with batches streamed to the GPU (VRAM < 1 GB), auto = gpu if it fits")
     p.add_argument("--seed", type=int, default=123)
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
                    help="processes for ApEn")
@@ -607,41 +693,52 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    X, y, groups = build_eeg_cache(args.data_dir, args.patients, args.cache_dir)
-    args.window_len = int(X.shape[2])
-    log(f"data: X {X.shape} float16 uV | seizure windows {int((y == y.max()).sum())} "
-        f"({100 * (y == y.max()).mean():.2f}%) | patients {args.patients}")
+    # validate every input before touching it (truncated files -> clear error, not a bus error)
+    srcs = [data_dir / p / "X.npy" for p in args.patients]
+    shapes = [check_input_npy(s) for s in srcs]
+    if len({s[1:] for s in shapes}) != 1:
+        raise SystemExit(f"patients have different window shapes: "
+                         f"{dict(zip(args.patients, shapes))}")
+    y, groups = load_labels(data_dir, args.patients, [s[0] for s in shapes])
+    args.window_len = int(shapes[0][2])
+    log(f"data: {len(y)} windows | seizure windows {int((y == y.max()).sum())} "
+        f"({100 * (y == y.max()).mean():.2f}%) | "
+        f"{len(y) * shapes[0][1] * shapes[0][2] * 2 / 2**30:.1f} GB as float16")
     if len(args.class_names) != int(y.max()) + 1:
         args.class_names = [str(i) for i in range(int(y.max()) + 1)]
 
+    def parts(kind):
+        return [build_patient_cache(kind, p, s, args.cache_dir, args.workers)
+                for p, s in zip(args.patients, srcs)]
+
+    raw_parts = parts("raw")
     apen = None
-    if "apen" in args.exp:
-        apen = build_apen_cache(args.data_dir, args.patients, args.cache_dir, args.workers)
+    if any(e in args.exp for e in ("apen", "denoised")):
+        apen = np.concatenate([np.asarray(a) for a in parts("apen")])
 
     results = []
-    x_dev = None
+    raw_store = None
     for exp in args.exp:
         if exp == "denoised":
-            x_dev = None
+            raw_store = None                          # free raw data before loading ATAR data
             if device.type == "cuda":
                 torch.cuda.empty_cache()
-            Xd = build_denoised_cache(args.data_dir, args.patients, args.cache_dir, args.workers)
-            assert Xd.shape == X.shape
-            x_exp = to_device_chunked(Xd, device)
-            feats = apen if apen is not None else build_apen_cache(
-                args.data_dir, args.patients, args.cache_dir, args.workers)
+            store = WindowStore(parts("atar"), device, "denoised EEG", args.data_on,
+                                args.eval_batch_size)
+            feats = apen
         else:
-            if x_dev is None:
-                x_dev = to_device_chunked(X, device)
-            x_exp = x_dev
+            if raw_store is None:
+                raw_store = WindowStore(raw_parts, device, "raw EEG", args.data_on,
+                                        args.eval_batch_size)
+            store = raw_store
             feats = apen if exp == "apen" else None
 
         if device.type == "cuda":
             log(f"VRAM in use: {torch.cuda.memory_allocated() / 2**30:.1f} GB")
-        results.append(train_cv(exp, x_exp, feats, y, groups, args, device,
+        results.append(train_cv(exp, store, feats, y, groups, args, device,
                                 Path(args.out_dir) / exp, args.class_names))
         if exp == "denoised":
-            del x_exp
+            del store
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 

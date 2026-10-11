@@ -1,0 +1,4 @@
+# Experiment: regularised FiLM-CNN (dropout in blocks + FiLM generator + classifier)
+model: ficnn_reg
+preprocess: raw
+features: apen

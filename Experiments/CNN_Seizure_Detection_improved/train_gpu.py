@@ -19,13 +19,17 @@ Config system (each layer overrides the previous):
 Usage
   python train_gpu.py --exp ficnn_apen
   python train_gpu.py --exp ficnn_apen --tune
+  python train_gpu.py --exp ficrnn_apen              # sequence model, sequence_len set in yaml
   python train_gpu.py --exp ficnn_apen --lr 1e-3 --epochs 50
   python train_gpu.py --list-experiments
 
 Adding a new model
-  1. Define it in Architectures.py with signature (extra_features, n_classes).
+  1. Define it in Architectures.py.
+     - Window model  : forward(x, f)         x:(B,C,W)   f:(B,F)|None  -> (B, n_classes)
+     - Sequence model: forward(x_seq, f_seq) x:(N,T,C,W) f:(N,T,F)|None -> (N,T, n_classes)
   2. Add one line to MODEL_REGISTRY below.
   3. Create configs/experiments/<your_exp>.yaml pointing to it.
+     Set sequence_len > 1 for sequence models.
 """
 import argparse
 import copy
@@ -52,12 +56,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 # ---------------------------------------------------------------------------
 # Model registry – add new architectures here (one line each).
 # ---------------------------------------------------------------------------
-from Architectures import FiCNN, FiCRNN, control  # noqa: E402
+from Architectures import FiCNN, FiCNN_reg, FiCRNN  # noqa: E402
 
 MODEL_REGISTRY = {
-    "control":  control,
-    "ficnn":  FiCNN,
-    "ficrnn": FiCRNN,
+    "ficnn":     FiCNN,
+    "ficnn_reg": FiCNN_reg,
+    "ficrnn":    FiCRNN,
 }
 
 # ---------------------------------------------------------------------------
@@ -69,7 +73,7 @@ _EXP_DIR     = _CONFIG_DIR / "experiments"
 _DEFAULT_CFG = _CONFIG_DIR / "default_training_config.yaml"
 
 # ---------------------------------------------------------------------------
-# Tune search-space defaults (used when the experiment yaml has no tune block)
+# Tune search-space defaults
 # ---------------------------------------------------------------------------
 _DEFAULT_TUNE = {
     "n_trials": 8,
@@ -229,12 +233,7 @@ def build_patient_cache(kind, patient, src, cache_dir, workers):
 def load_labels(data_dir, patients, n_windows):
     ys, gs = [], []
     for k, (p, n) in enumerate(zip(patients, n_windows)):
-        yk = np.load(Path(data_dir) / p / "y.npy").astype(np.int64)
-        if yk.ndim == 2:                      # per-channel labels (N, C)
-            if yk.shape[0] != n:
-                raise SystemExit(f"{p}: y.npy has {yk.shape[0]} rows but X.npy has {n} windows")
-            yk = yk.max(axis=1)               # window is seizure if any channel is
-        yk = yk.ravel()
+        yk = np.load(Path(data_dir) / p / "y.npy").astype(np.int64).ravel()
         if len(yk) != n:
             raise SystemExit(f"{p}: y.npy has {len(yk)} labels but X.npy has {n} windows")
         ys.append(yk)
@@ -246,7 +245,6 @@ def subsample_windows(y, groups, fraction, seed):
     """
     Stratified subsample of windows, preserving class balance within each patient.
     Returns a sorted flat index array into the original N_total-length arrays.
-    fraction=1.0 returns all indices unchanged.
     """
     if fraction >= 1.0:
         return np.arange(len(y))
@@ -262,6 +260,27 @@ def subsample_windows(y, groups, fraction, seed):
             chosen.append(rng.choice(cls_idx, size=n_keep, replace=False))
         idx.append(np.concatenate(chosen))
     return np.sort(np.concatenate(idx))
+
+
+class _IndexedMmap:
+    """
+    Lazy view of a memmap at specific row indices.
+    Passed to WindowStore instead of a materialised array so we never load
+    the full patient array into RAM — only CHUNK rows at a time are read.
+    """
+    def __init__(self, mmap, idx):
+        self._m, self._i = mmap, idx
+
+    def __len__(self):
+        return len(self._i)
+
+    @property
+    def shape(self):
+        return (len(self._i),) + self._m.shape[1:]
+
+    def __getitem__(self, s):
+        # s is a slice from WindowStore's CHUNK loop
+        return self._m[self._i[s]]
 
 
 def ram_available():
@@ -316,9 +335,11 @@ class WindowStore:
                     log(f"{name}: could not pin {need / 2**30:.1f} GB, using pageable RAM")
             if not pin:
                 self.x = torch.empty(self.shape, dtype=torch.float16)
+
         i, n_bad = 0, 0
         for p in parts:
             for s in range(0, len(p), CHUNK):
+                # _IndexedMmap.__getitem__ returns only the needed rows from the mmap
                 arr = np.array(p[s:s + CHUNK])
                 bad = ~np.isfinite(arr)
                 if bad.any():
@@ -358,7 +379,32 @@ class WindowStore:
 
 
 # =============================================================================
-# 3. Training core
+# 3. Sequence batching (for RNN models, sequence_len > 1)
+# =============================================================================
+def make_sequences(groups, seq_len, subset_idx):
+    """
+    Chop each patient's windows in `subset_idx` into non-overlapping sequences of
+    length `seq_len`.  Sequences that would span a patient boundary are dropped.
+
+    Returns a list of (start, length) pairs, where start is an index into subset_idx
+    (i.e. into the flat store / y / f_dev arrays).
+    """
+    seqs = []
+    for pat in np.unique(groups[subset_idx]):
+        # positions within subset_idx that belong to this patient, in original order
+        pos = np.where(groups[subset_idx] == pat)[0]
+        # only keep runs of exactly seq_len consecutive positions
+        for s in range(0, len(pos) - seq_len + 1, seq_len):
+            chunk = pos[s:s + seq_len]
+            # verify they are consecutive in the original flat array
+            orig = subset_idx[chunk]
+            if orig[-1] - orig[0] == seq_len - 1:
+                seqs.append(chunk)   # indices into subset_idx
+    return seqs   # list of int arrays, each of length seq_len
+
+
+# =============================================================================
+# 4. Training core
 # =============================================================================
 def pick_device():
     if not torch.cuda.is_available():
@@ -390,25 +436,62 @@ def pick_device():
     return torch.device("cuda")
 
 
+def _forward_and_loss(model, store, f_all, y_dev, idx, class_w, seq_len, device):
+    """
+    Run one forward pass for either window or sequence models.
+
+    Window model (seq_len==1):
+      idx: (B,)  ->  xs: (B,C,W), xf: (B,F)  ->  logits: (B,K)  ->  labels: (B,)
+
+    Sequence model (seq_len>1):
+      idx: (B, T)  ->  xs: (B,T,C,W), xf: (B,T,F)  ->  logits: (B,T,K)
+      flattened to (B*T, K) and (B*T,) for the loss
+    """
+    idx_d = idx.to(device, non_blocking=True)
+
+    if seq_len == 1:
+        xs = store.get(idx)
+        xf = None if f_all is None else f_all[idx_d]
+        logits = model(xs, xf)
+        labels = y_dev[idx_d]
+    else:
+        # idx: (B, T) — each row is a sequence of T window indices
+        B, T = idx.shape
+        flat = idx.reshape(-1)           # (B*T,)
+        flat_d = flat.to(device, non_blocking=True)
+        xs = store.get(flat).reshape(B, T, *store.shape[1:])  # (B, T, C, W)
+        xf = (None if f_all is None
+              else f_all[flat_d].reshape(B, T, -1))           # (B, T, F)
+        logits = model(xs, xf).reshape(B * T, -1)             # (B*T, K)
+        labels = y_dev[flat_d]                                 # (B*T,)
+
+    loss = F.cross_entropy(logits, labels, weight=class_w)
+    return loss, logits.detach(), labels
+
+
 @torch.no_grad()
-def evaluate(model, store, f_all, y_dev, idx, class_w, pos_class, bs):
+def evaluate(model, store, f_all, y_dev, idx, class_w, pos_class, bs, seq_len, device):
+    """Evaluate over idx; idx is flat (window model) or 2-D (sequence model)."""
     model.eval()
-    loss_sum = torch.zeros((), device=y_dev.device)
-    w_sum    = torch.zeros((), device=y_dev.device)
-    outs = []
-    dev = y_dev.device
-    for s in range(0, len(idx), bs):
-        b  = idx[s:s + bs]
-        bd = b.to(dev, non_blocking=True)
-        out = model(store.get(b), None if f_all is None else f_all[bd])
-        yb = y_dev[bd]
-        loss_sum += F.cross_entropy(out, yb, weight=class_w, reduction="sum")
-        w_sum    += class_w[yb].sum()
-        outs.append(out)
-    out    = torch.cat(outs)
-    preds  = out.argmax(1).cpu().numpy()
-    probs  = out.softmax(1)[:, pos_class].float().cpu().numpy()
-    labels = y_dev[idx.to(dev)].cpu().numpy()
+    loss_sum = torch.zeros((), device=device)
+    w_sum    = torch.zeros((), device=device)
+    all_logits, all_labels = [], []
+
+    # iterate in bs-sized chunks (bs = sequences for seq model, windows for window model)
+    n = len(idx)
+    for s in range(0, n, bs):
+        chunk = idx[s:s + bs]
+        _, logits, labels = _forward_and_loss(
+            model, store, f_all, y_dev, chunk, class_w, seq_len, device)
+        loss_sum += F.cross_entropy(logits, labels, weight=class_w, reduction="sum")
+        w_sum    += class_w[labels].sum()
+        all_logits.append(logits)
+        all_labels.append(labels)
+
+    logits = torch.cat(all_logits)
+    labels = torch.cat(all_labels).cpu().numpy()
+    preds  = logits.argmax(1).cpu().numpy()
+    probs  = logits.softmax(1)[:, pos_class].float().cpu().numpy()
     return (loss_sum / w_sum).item(), preds, labels, probs
 
 
@@ -435,13 +518,54 @@ def make_splits(y, groups, folds, seed):
     return list(sgkf.split(np.zeros(len(y)), y, groups))
 
 
-def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, device, n_feat, K, pos,
-                  n_epochs, tag):
-    """Train for n_epochs on one fold; return best val AUPRC."""
-    tr_t = torch.as_tensor(tr, device=store.index_device)
-    va_t = torch.as_tensor(va, device=store.index_device)
-    tr_d = torch.as_tensor(tr, device=device)
+def _make_batch_idx(subset_idx, groups, seq_len, bs, seed, store_device):
+    """
+    Build a shuffled list of batch index tensors for one epoch.
 
+    seq_len == 1: random window batches — identical to original behaviour.
+    seq_len  > 1: random sequence batches; each batch item is T consecutive windows
+                  from the same patient.  Sequences are shuffled, not windows.
+    """
+    rng = torch.Generator()
+    rng.manual_seed(seed)
+
+    if seq_len == 1:
+        idx_t  = torch.as_tensor(subset_idx, device=store_device)
+        perm   = idx_t[torch.randperm(len(idx_t), generator=rng, device=store_device)]
+        return [perm[s:s + bs] for s in range(0, len(perm) - bs + 1, bs)]
+    else:
+        seqs   = make_sequences(groups, seq_len, subset_idx)   # list of int arrays (T,)
+        order  = torch.randperm(len(seqs), generator=rng).tolist()
+        batches = []
+        for s in range(0, len(order) - bs + 1, bs):
+            batch_seqs = [seqs[order[i]] for i in range(s, s + bs)]
+            # each seq is indices into the flat store; stack to (bs, T)
+            batches.append(torch.tensor(
+                np.stack([subset_idx[seq] for seq in batch_seqs]),
+                device=store_device))
+        return batches
+
+
+def _make_eval_idx(subset_idx, groups, seq_len, store_device):
+    """
+    For evaluation: flat tensor (window model) or 2-D tensor (sequence model).
+    Sequence model: only windows that fall into complete sequences are evaluated.
+    """
+    if seq_len == 1:
+        return torch.as_tensor(subset_idx, device=store_device)
+    seqs = make_sequences(groups, seq_len, subset_idx)
+    if not seqs:
+        raise SystemExit("No complete sequences found in validation set — "
+                         "reduce sequence_len or use more patients per fold.")
+    return torch.tensor(
+        np.stack([subset_idx[seq] for seq in seqs]),
+        device=store_device)   # (n_seqs, T)
+
+
+def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, groups,
+                  device, n_feat, K, pos, n_epochs, seq_len):
+    """Train for n_epochs on one fold; return best val AUPRC."""
+    tr_d    = torch.as_tensor(tr, device=device)
     counts  = torch.bincount(y_dev[tr_d], minlength=K).float()
     class_w = (counts.sum() / (K * counts.clamp(min=1))) ** cfg["power"]
 
@@ -452,6 +576,8 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, device, n_feat, K,
     else:
         f_norm = None
 
+    va_idx = _make_eval_idx(va, groups, seq_len, store.index_device)
+
     model = ModelCls(extra_features=n_feat, n_classes=K).to(device)
     opt   = torch.optim.AdamW(model.parameters(),
                               lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -460,23 +586,21 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, device, n_feat, K,
 
     for epoch in range(n_epochs):
         model.train()
-        perm      = tr_t[torch.randperm(len(tr_t), device=tr_t.device)]
-        n_batches = len(perm) // bs
-        for b in range(n_batches):
-            idx   = perm[b * bs:(b + 1) * bs]
-            idx_d = idx.to(device, non_blocking=True)
-            xs    = store.get(idx)
-            xf    = None if f_norm is None else f_norm[idx_d]
-            loss  = F.cross_entropy(model(xs, xf), y_dev[idx_d], weight=class_w)
+        batches = _make_batch_idx(tr, groups, seq_len, bs,
+                                  cfg["seed"] + epoch, store.index_device)
+        for idx in batches:
+            opt.zero_grad(set_to_none=True)
+            loss, _, _ = _forward_and_loss(model, store, f_norm, y_dev,
+                                           idx, class_w, seq_len, device)
             if not torch.isfinite(loss):
                 continue
-            opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["clip"])
             opt.step()
 
-        _, preds, labels, probs = evaluate(
-            model, store, f_norm, y_dev, va_t, class_w, pos, cfg["eval_batch_size"])
+        _, preds, labels, probs = evaluate(model, store, f_norm, y_dev, va_idx,
+                                          class_w, pos, cfg["eval_batch_size"],
+                                          seq_len, device)
         m = fold_metrics(labels, preds, probs, pos)
         score = next((v for v in (m["auprc"], m["bacc"]) if np.isfinite(v)), -np.inf)
         if score > best_auprc:
@@ -489,18 +613,18 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, device, n_feat, K,
 
 
 # =============================================================================
-# 4. Quick hyperparameter search
+# 5. Quick hyperparameter search
 # =============================================================================
 def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_dir):
     """
     Random search over lr / weight_decay / batch_size.
-    Runs n_trials × n_folds × n_epochs, picks the best combo by val AUPRC.
-    Updates cfg_dict in-place with the winning params and saves tune_results.json.
+    Updates cfg_dict in-place with the winning params, saves tune_results.json.
     """
     search   = tune_cfg["search"]
     n_trials = tune_cfg["n_trials"]
     n_folds  = tune_cfg["n_folds"]
     n_epochs = tune_cfg["n_epochs"]
+    seq_len  = int(cfg_dict.get("sequence_len", 1))
 
     K   = int(y.max()) + 1
     pos = K - 1
@@ -514,7 +638,8 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
     rng     = random.Random(cfg_dict["seed"])
     results = []
 
-    log(f"[tune] {n_trials} trials × {n_folds} fold(s) × {n_epochs} epochs")
+    log(f"[tune] {n_trials} trials × {n_folds} fold(s) × {n_epochs} epochs"
+        f"  (sequence_len={seq_len})")
     log(f"[tune] search space: { {k: v for k, v in search.items()} }")
 
     for trial in range(n_trials):
@@ -527,7 +652,8 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
         scores = []
         for tr, va in tune_splits:
             s = _run_one_fold(ModelCls, trial_cfg, store, f_dev, y_dev,
-                              tr, va, device, n_feat, K, pos, n_epochs, tag)
+                              tr, va, groups, device, n_feat, K, pos,
+                              n_epochs, seq_len)
             scores.append(s)
         mean_auprc = float(np.mean(scores))
         results.append({"trial": trial + 1, "params": {p: trial_cfg[p] for p in search},
@@ -547,13 +673,14 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
 
 
 # =============================================================================
-# 5. Full cross-validated training
+# 6. Full cross-validated training
 # =============================================================================
 def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_name):
-    out_dir = Path(out_dir)
+    out_dir     = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     class_names = cfg_dict["class_names"]
+    seq_len     = int(cfg_dict.get("sequence_len", 1))
     y_dev  = torch.as_tensor(y, dtype=torch.long, device=device)
     f_dev  = None if feats is None else torch.as_tensor(feats, dtype=torch.float32, device=device)
     n_feat = 0 if feats is None else feats.shape[1]
@@ -568,8 +695,6 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
 
     for fold, (tr, va) in enumerate(splits):
         t_fold = time.time()
-        tr_t = torch.as_tensor(tr, device=store.index_device)
-        va_t = torch.as_tensor(va, device=store.index_device)
         tr_d = torch.as_tensor(tr, device=device)
 
         counts  = torch.bincount(y_dev[tr_d], minlength=K).float()
@@ -582,12 +707,17 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
         else:
             f_all = None
 
+        va_idx = _make_eval_idx(va, groups, seq_len, store.index_device)
+
         torch.manual_seed(cfg_dict["seed"] + fold)
         model = ModelCls(extra_features=n_feat, n_classes=K).to(device)
         opt   = torch.optim.AdamW(model.parameters(),
                                   lr=cfg_dict["lr"], weight_decay=cfg_dict["weight_decay"])
 
-        log(f"[{run_name}] fold {fold + 1}/{n_folds} | train {len(tr)} "
+        n_seq_tr = (len(make_sequences(groups, seq_len, tr))
+                    if seq_len > 1 else len(tr))
+        log(f"[{run_name}] fold {fold + 1}/{n_folds} | train {len(tr)} windows "
+            f"({n_seq_tr} {'seqs' if seq_len > 1 else 'windows'}) "
             f"(pos {int(counts[pos])}) | val {len(va)} "
             f"| class w {[round(float(w), 2) for w in class_w]}")
 
@@ -598,30 +728,29 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
         for epoch in range(cfg_dict["epochs"]):
             t_ep = time.time()
             model.train()
-            perm      = tr_t[torch.randperm(len(tr_t), device=tr_t.device)]
-            n_batches = len(perm) // bs
+            batches   = _make_batch_idx(tr, groups, seq_len, bs,
+                                        cfg_dict["seed"] + fold * 1000 + epoch,
+                                        store.index_device)
             run       = torch.zeros((), device=device)
             n_skipped = 0
-            for b in range(n_batches):
-                idx   = perm[b * bs:(b + 1) * bs]
-                idx_d = idx.to(device, non_blocking=True)
-                xs    = store.get(idx)
-                xf    = None if f_all is None else f_all[idx_d]
-                loss  = F.cross_entropy(model(xs, xf), y_dev[idx_d], weight=class_w)
+            for idx in batches:
+                opt.zero_grad(set_to_none=True)
+                loss, _, _ = _forward_and_loss(model, store, f_all, y_dev,
+                                               idx, class_w, seq_len, device)
                 if not torch.isfinite(loss):
                     n_skipped += 1
                     continue
-                opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg_dict["clip"])
                 opt.step()
                 run += loss.detach()
-            hist["train_loss"].append((run / max(n_batches - n_skipped, 1)).item())
+            hist["train_loss"].append((run / max(len(batches) - n_skipped, 1)).item())
             if n_skipped:
                 log(f"    warning: skipped {n_skipped} batches with non-finite loss")
 
             vloss, preds, labels, probs = evaluate(
-                model, store, f_all, y_dev, va_t, class_w, pos, cfg_dict["eval_batch_size"])
+                model, store, f_all, y_dev, va_idx, class_w, pos,
+                cfg_dict["eval_batch_size"], seq_len, device)
             m = fold_metrics(labels, preds, probs, pos)
             hist["val_loss"].append(vloss)
             hist["val_acc"].append(m["acc"])
@@ -740,20 +869,13 @@ def _plot(name, histories, cm, class_names, pos, path):
 
 
 # =============================================================================
-# 6. Config loading
+# 7. Config loading
 # =============================================================================
 def _available_experiments():
     return sorted(p.stem for p in _EXP_DIR.glob("*.yaml")) if _EXP_DIR.exists() else []
 
 
 def load_cfg(exp_name, cli_overrides: dict) -> dict:
-    """
-    Build a flat config dict:
-      default_training_config.yaml
-        <- experiments/<exp_name>.yaml  (model/preprocess/features + optional overrides)
-          <- cli_overrides              (anything explicitly passed on the command line)
-    The 'tune' block is extracted and returned separately.
-    """
     if not _DEFAULT_CFG.exists():
         raise SystemExit(f"Base config not found: {_DEFAULT_CFG}")
     with _DEFAULT_CFG.open() as f:
@@ -770,7 +892,6 @@ def load_cfg(exp_name, cli_overrides: dict) -> dict:
         exp = yaml.safe_load(f) or {}
 
     tune_cfg = {**_DEFAULT_TUNE, **exp.pop("tune", {})}
-    # merge search sub-dict if the experiment yaml partially overrides it
     if "search" in exp.get("tune", {}):
         tune_cfg["search"] = {**_DEFAULT_TUNE["search"], **exp["tune"]["search"]}
 
@@ -791,31 +912,23 @@ def load_cfg(exp_name, cli_overrides: dict) -> dict:
 
 
 # =============================================================================
-# 7. CLI + main
+# 8. CLI + main
 # =============================================================================
 def parse_args():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
     p.add_argument("--exp", default=None,
-                   help="experiment name (stem of a yaml in configs/experiments/); "
-                        "use --list-experiments to see what's available")
-    p.add_argument("--list-experiments", action="store_true",
-                   help="print available experiment names and exit")
+                   help="experiment name (stem of a yaml in configs/experiments/)")
+    p.add_argument("--list-experiments", action="store_true")
     p.add_argument("--tune", action="store_true",
                    help="run a quick random search before full CV")
 
-    # paths – can also be set in the experiment yaml; CLI takes precedence
-    p.add_argument("--data-dir",  default=None,
-                   help="path to npy_data/ folder (default: ../CHB-MIT_Formating/npy_data, "
-                        "or data_dir in the experiment yaml)")
-    p.add_argument("--cache-dir", default=None,
-                   help="cache directory (default: cache, or cache_dir in the experiment yaml)")
-    p.add_argument("--out-dir",   default=None,
-                   help="results root (default: results, or out_dir in the experiment yaml)")
+    p.add_argument("--data-dir",  default=None)
+    p.add_argument("--cache-dir", default=None)
+    p.add_argument("--out-dir",   default=None)
     p.add_argument("--patients",  nargs="+", default=None)
 
-    # hyperparams – all optional, override the yaml stack
     p.add_argument("--folds",           type=int)
     p.add_argument("--epochs",          type=int)
     p.add_argument("--batch-size",      type=int,   dest="batch_size")
@@ -830,6 +943,8 @@ def parse_args():
     p.add_argument("--fs",              type=float)
     p.add_argument("--data-on",         dest="data_on", choices=["auto", "gpu", "ram"])
     p.add_argument("--class-names",     nargs="+",  dest="class_names")
+    p.add_argument("--sequence-len",    type=int,   dest="sequence_len",
+                   help="windows per RNN sequence (1 = window model, default from yaml)")
 
     return p.parse_args()
 
@@ -858,6 +973,7 @@ def main():
         "patience": args.patience, "seed": args.seed, "workers": args.workers,
         "fs": args.fs, "data_on": args.data_on, "class_names": args.class_names,
         "data_dir": args.data_dir, "cache_dir": args.cache_dir, "out_dir": args.out_dir,
+        "sequence_len": args.sequence_len,
     }
     cfg, tune_cfg = load_cfg(args.exp, cli_overrides)
 
@@ -866,6 +982,7 @@ def main():
         raise SystemExit(f"Unknown model '{cfg['model']}'. "
                          f"Available: {list(MODEL_REGISTRY)}")
 
+    seq_len   = int(cfg.get("sequence_len", 1))
     data_dir  = Path(cfg.get("data_dir")  or "../CHB-MIT_Formating/npy_data")
     cache_dir = Path(cfg.get("cache_dir") or "cache")
     out_dir   = Path(cfg.get("out_dir")   or "results") / args.exp
@@ -881,10 +998,10 @@ def main():
     if missing or not patients:
         raise SystemExit(f"no X.npy/y.npy for {missing or 'any patient'} in {data_dir.resolve()}")
 
-    log(f"experiment : {args.exp}")
-    log(f"model      : {cfg['model']}  |  preprocess: {cfg['preprocess']}"
-        f"  |  features: {cfg['features']}")
-    log(f"patients   : {patients}")
+    log(f"experiment   : {args.exp}")
+    log(f"model        : {cfg['model']}  |  preprocess: {cfg['preprocess']}"
+        f"  |  features: {cfg['features']}  |  sequence_len: {seq_len}")
+    log(f"patients     : {patients}")
 
     device = pick_device()
     torch.manual_seed(cfg["seed"])
@@ -899,7 +1016,6 @@ def main():
     y_full, groups_full = load_labels(data_dir, patients, [s[0] for s in shapes])
     cfg["window_len"] = int(shapes[0][2])
 
-    # optional stratified subsample (preserves class balance within each patient)
     fraction = float(cfg.get("data_fraction", 1.0))
     if fraction < 1.0:
         keep      = subsample_windows(y_full, groups_full, fraction, cfg["seed"])
@@ -921,17 +1037,28 @@ def main():
                 for p, s in zip(patients, srcs)]
 
     eeg_parts = parts(cfg["preprocess"])
-    apen_raw  = np.concatenate([np.asarray(a) for a in parts("apen")]) \
-                if cfg["features"] == "apen" else None
 
+    # --- RAM fix: use _IndexedMmap when subsampling so we never materialise
+    #              the full patient array; WindowStore reads it CHUNK rows at a time.
     if keep is not None:
-        # extract per-patient local indices so WindowStore sees contiguous sub-arrays
         offsets     = np.concatenate([[0], np.cumsum([s[0] for s in shapes])])
-        store_parts = [np.asarray(eeg_parts[k])[keep[groups_full[keep] == k] - offsets[k]]
+        pat_indices = [keep[groups_full[keep] == k] - offsets[k]
                        for k in range(len(patients))]
-        apen        = apen_raw[keep] if apen_raw is not None else None
+        store_parts = [_IndexedMmap(eeg_parts[k], pat_indices[k])
+                       for k in range(len(patients))]
+        # apen: build per-patient from indices, never concatenate the full array first
+        if cfg["features"] == "apen":
+            apen_parts = parts("apen")
+            apen = np.concatenate([
+                np.asarray(apen_parts[k])[pat_indices[k]]
+                for k in range(len(patients))
+            ])
+        else:
+            apen = None
     else:
-        store_parts, apen = eeg_parts, apen_raw
+        store_parts = eeg_parts
+        apen = (np.concatenate([np.asarray(a) for a in parts("apen")])
+                if cfg["features"] == "apen" else None)
 
     store = WindowStore(store_parts, device, f"{cfg['preprocess']} EEG",
                         cfg["data_on"], cfg["eval_batch_size"])
@@ -939,7 +1066,6 @@ def main():
     if device.type == "cuda":
         log(f"VRAM in use: {torch.cuda.memory_allocated() / 2**30:.1f} GB")
 
-    # optional quick random search
     if args.tune:
         run_tune(cfg, tune_cfg, ModelCls, store, apen, y, groups, device, out_dir)
         log(f"[tune] proceeding to full CV with: "

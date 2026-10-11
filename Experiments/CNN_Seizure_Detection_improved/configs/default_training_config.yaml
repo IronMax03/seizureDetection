@@ -22,3 +22,5 @@ fs: 256.0
 class_names:
 - normal
 - seizure
+sequence_len: 1    # windows per RNN sequence; 1 = window-independent (FiCNN/FiCNN_reg)
+                   # set > 1 for sequence models (FiCRNN); e.g. 32 = 32s of context at 256Hz/1s windows

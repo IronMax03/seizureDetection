@@ -31,11 +31,6 @@
 \def\yb{-0.9}   % FiLM block row
 \def\yz{-3.55}  % zoomed block row
 
-
-\def\yg{1.6}    % FiLM generator row
-\def\yb{-0.9}   % FiLM block row
-\def\yz{-3.55}  % zoomed block row
-
 % =====================================================================
 % INPUTS FOR ONE WINDOW (left)
 % =====================================================================
@@ -59,15 +54,15 @@
 
 \foreach \i/\cin/\cout/\k/\lc/\lp [count=\n] in
   {1/23/18/6/251/125, 2/18/15/5/121/60, 3/15/10/4/57/28, 4/10/10/4/25/12, 5/10/10/4/9/4}{
-  \node[blk] (B\i) at ({5.45+(\n-1)*3.0}, \yb)
+  \node[blk] (B\i) at ({5.45+(\n-1)*3.9}, \yb)
     {\textbf{FiLM block \i}\\[-1pt]$\cin\!\to\!\cout$ ch, $k{=}\k$};
-  \node[dimlab, below=1pt of B\i] (Bs\i) {$\cout{\times}\lc \to \cout{\times}\lp$};
 }
 \node[box, draw=cCnnD, fill=cCnn, minimum width=1.45cm, minimum height=1.2cm] (flat)
-  at (19.75, \yb) {Flatten\\[-1pt]$10\times4$};
-\draw[arr] (xs0.east) -- (B1.west);
-\foreach \a/\b in {1/2,2/3,3/4,4/5}{\draw[arr] (B\a) -- (B\b);}
-\draw[arr] (B5) -- (flat);
+  at (23.95, \yb) {Flatten\\[-1pt]$10\times4$};
+\draw[arr] (xs0.east) -- node[above, dimlab, pos=0.27] {$23\times256$} (B1.west);
+\foreach \a/\b/\d in {1/2/18\times125, 2/3/15\times60, 3/4/10\times28, 4/5/10\times12}{
+  \draw[arr] (B\a) -- node[above, dimlab] {$\d$} (B\b);}
+\draw[arr] (B5) -- node[above, dimlab] {$10\times4$} (flat);
 
 \coordinate (bus) at (0, {(\yg+\yb)/2+0.05});
 \draw[thick, draw=cFilmD] (g5.south) -- (g5.south |- bus);
@@ -98,52 +93,43 @@
 \end{scope}
 \node[font=\scriptsize\bfseries, text=black!60, anchor=south west] at ($(zoom.north west)+(0.05,0.02)$)
   {inside each FiLM block $i$};
-\draw[black!45, dotted, thick] (Bs3.south west) -- (zoom.north west -| o2.west);
-\draw[black!45, dotted, thick] (Bs3.south east) -- (zoom.north east -| o5.east);
+\draw[black!45, dotted, thick] (B3.south west) -- (zoom.north west -| o2.west);
+\draw[black!45, dotted, thick] (B3.south east) -- (zoom.north east -| o5.east);
 
 \begin{scope}[on background layer]
-  \node[fit=(g1)(g5)(B1)(flat)(zoom)(Bs1), draw=cCnnD, dashed, very thick,
+  \node[fit=(g1)(g5)(B1)(flat)(zoom), draw=cCnnD, dashed, very thick,
         rounded corners=6pt, inner sep=9pt, fill=cCnn!25] (enc) {};
 \end{scope}
 \node[font=\small\bfseries, text=cCnnD, anchor=south west] at ($(enc.north west)+(0.05,0.05)$)
   {FiLM-CNN encoder};
-\node[font=\scriptsize, text=cCnnD, anchor=south east] at ($(enc.north east)+(-0.05,0.08)$)
-  {output: one feature vector $\mathbf{z}_t$ per window};
 
 % =====================================================================
 % RECURRENT CLASSIFIER (right)
 % =====================================================================
-\node[box, draw=cRnnD, fill=cRnn, minimum height=1.2cm] (rnn) at (25.4, \yb)
+\node[box, draw=cRnnD, fill=cRnn, minimum height=1.2cm] (rnn) at (29.6, \yb)
   {\textbf{RNN cell} (16 units)\\[1pt]
    $\mathbf{h}_t=\tanh\!\big(W_{z}\mathbf{z}_t+W_{h}\mathbf{h}_{t-1}+\mathbf{b}\big)$};
-\node[head, minimum height=1.2cm] (dp) at (29.9, \yb) {Dropout\\[-1pt]$p=0.3$};
-\node[head, minimum height=1.2cm] (lin) at (32.6, \yb) {Linear\\[-1pt]$16\to2$};
-\node (yt) at (34.55, \yb) {$\hat{\mathbf{y}}_t\in\mathbb{R}^{2}$};
+\node[head, minimum height=1.2cm] (dp) at (34.1, \yb) {Dropout\\[-1pt]$p=0.3$};
+\node[head, minimum height=1.2cm] (lin) at (36.8, \yb) {Linear\\[-1pt]$16\to2$};
+\node (yt) at (39, \yb) {$\hat{\mathbf{y}}_t\in\mathbb{R}^{2}$};
 \draw[arr] (flat.east) -- node[above, font=\scriptsize] {$\mathbf{z}_t\in\mathbb{R}^{40}$} (rnn.west);
-\coordinate (br) at (28.45, \yb);
+\coordinate (br) at (32.65, \yb);
 \draw[arr] (rnn.east) -- node[pos=0.35, below, dimlab] {$\mathbf{h}_t$} (dp.west);
 \draw[arr] (lin) -- (yt);
 \draw[arr] (dp) -- (lin);
 % recurrence loop
-\node[box, draw=cRnnD, fill=white, minimum height=0.8cm] (delay) at (25.4, \yg)
+\node[box, draw=cRnnD, fill=white, minimum height=0.8cm] (delay) at (29.6, \yg)
   {delay: keep $\mathbf{h}_t$ for the next window};
 \fill[cRnnD] (br) circle (1.6pt);
 \draw[arr, draw=cRnnD] (br) |- (delay.east);
 \draw[arr, draw=cRnnD] (delay.south) -- node[right, font=\scriptsize, text=cRnnD] {$\mathbf{h}_{t-1}$} (rnn.north);
-\node[font=\scriptsize, text=cRnnD, anchor=south] (h0n) at (delay.north) {$\mathbf{h}_0=\mathbf{0}$ at the start of every sequence};
+
 \begin{scope}[on background layer]
-  \node[fit=(rnn)(delay)(h0n)(yt)(lin), draw=cRnnD, dashed, very thick, rounded corners=6pt,
+  \node[fit=(rnn)(delay)(lin), draw=cRnnD, dashed, very thick, rounded corners=6pt,
         inner sep=12pt, fill=cRnn!20] (rc) {};
 \end{scope}
 \node[font=\small\bfseries, text=cRnnD, anchor=south west] at ($(rc.north west)+(0.05,0.05)$)
   {Recurrent classifier};
-\node[note, text=cRnnD, anchor=north west] at ($(rc.south west)+(0.1,-0.15)$)
-  {unidirectional (causal): $\hat{\mathbf{y}}_t$ only uses windows $1,\dots,t$\\
-   output for a sequence of $T=32$ windows: logits of shape $(N,T,2)$};
-
-\node[note, text=black!60, anchor=north west] at ($(enc.south west)+(0.1,-0.15)$)
-  {BatchNorm has no affine parameters, so FiLM is the only per-channel scale and shift.\\
-   The generator's last layer is zero-initialized: every block starts with $\boldsymbol\gamma=1$, $\boldsymbol\beta=0$.};
 
 \end{tikzpicture}
 \end{document}

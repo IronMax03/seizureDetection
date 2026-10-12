@@ -230,10 +230,25 @@ def build_patient_cache(kind, patient, src, cache_dir, workers):
     return np.load(path, mmap_mode="r")
 
 
+def _window_labels(yk, n, patient):
+    """Reduce y.npy to one integer label per window."""
+    yk = np.asarray(yk)
+    if yk.ndim == 1 and len(yk) == n:
+        return yk.astype(np.int64)
+    if yk.ndim == 1 and len(yk) % n == 0:          # flattened (N*C,) -> (N, C)
+        yk = yk.reshape(n, -1)
+    if yk.ndim == 2 and yk.shape[0] == n:
+        uniq = np.unique(yk)
+        if np.isin(uniq, [0, 1]).all() and (yk.sum(1) == 1).all() and yk.shape[1] > 1:
+            return yk.argmax(1).astype(np.int64)   # one-hot over classes
+        return yk.max(1).astype(np.int64)          # per-channel flags: seizure if any channel
+    raise SystemExit(f"{patient}: y.npy shape {yk.shape} incompatible with {n} windows")
+
+
 def load_labels(data_dir, patients, n_windows):
     ys, gs = [], []
     for k, (p, n) in enumerate(zip(patients, n_windows)):
-        yk = np.load(Path(data_dir) / p / "y.npy").astype(np.int64).ravel()
+        yk = _window_labels(np.load(Path(data_dir) / p / "y.npy"), n, p)
         if len(yk) != n:
             raise SystemExit(f"{p}: y.npy has {len(yk)} labels but X.npy has {n} windows")
         ys.append(yk)
@@ -259,6 +274,35 @@ def subsample_windows(y, groups, fraction, seed):
             n_keep  = max(1, round(len(cls_idx) * fraction))
             chosen.append(rng.choice(cls_idx, size=n_keep, replace=False))
         idx.append(np.concatenate(chosen))
+    return np.sort(np.concatenate(idx))
+
+
+def subsample_blocks(y, groups, fraction, block, seed):
+    """
+    Subsample for sequence models: keep `fraction` of contiguous runs of `block`
+    windows per patient, so every kept run is `block` truly consecutive windows.
+    Runs are aligned to the patient's first window, never cross patients, and are
+    stratified on whether they contain any seizure window.
+    Returns a sorted flat index array into the original N_total-length arrays.
+    """
+    if fraction >= 1.0:
+        return np.arange(len(y))
+    rng, pos, idx = np.random.default_rng(seed), y.max(), []
+    for patient_id in np.unique(groups):
+        pat = np.where(groups == patient_id)[0]          # contiguous per patient
+        starts = pat[0] + block * np.arange(len(pat) // block)
+        if len(starts) == 0:
+            continue
+        has_sz = np.array([(y[s:s + block] == pos).any() for s in starts])
+        for mask in (has_sz, ~has_sz):
+            cand = starts[mask]
+            if len(cand):
+                n_keep = max(1, round(len(cand) * fraction))
+                for s in rng.choice(cand, size=n_keep, replace=False):
+                    idx.append(np.arange(s, s + block))
+    if not idx:
+        raise SystemExit(f"data_fraction subsampling kept no complete {block}-window runs; "
+                         f"reduce sequence_len")
     return np.sort(np.concatenate(idx))
 
 
@@ -473,11 +517,16 @@ def _forward_and_loss(model, store, f_all, y_dev, idx, class_w, seq_len, device)
 def evaluate(model, store, f_all, y_dev, idx, class_w, pos_class, bs, seq_len, device):
     """Evaluate over idx; idx is flat (window model) or 2-D (sequence model)."""
     model.eval()
+    # bs is always a number of WINDOWS.  For sequence models each item of idx is a
+    # sequence of seq_len windows, so convert to sequences per chunk; otherwise a
+    # whole validation fold can end up in one forward pass and exhaust VRAM.
+    if seq_len > 1:
+        bs = max(1, bs // seq_len)
     loss_sum = torch.zeros((), device=device)
     w_sum    = torch.zeros((), device=device)
     all_logits, all_labels = [], []
 
-    # iterate in bs-sized chunks (bs = sequences for seq model, windows for window model)
+    # iterate in bs-sized chunks (sequences for seq model, windows for window model)
     n = len(idx)
     for s in range(0, n, bs):
         chunk = idx[s:s + bs]
@@ -1018,10 +1067,15 @@ def main():
 
     fraction = float(cfg.get("data_fraction", 1.0))
     if fraction < 1.0:
-        keep      = subsample_windows(y_full, groups_full, fraction, cfg["seed"])
+        if seq_len > 1:
+            # keep whole runs of seq_len windows so RNN sequences stay contiguous in time
+            keep = subsample_blocks(y_full, groups_full, fraction, seq_len, cfg["seed"])
+            how  = f"contiguous {seq_len}-window runs, stratified per patient"
+        else:
+            keep = subsample_windows(y_full, groups_full, fraction, cfg["seed"])
+            how  = "stratified per patient"
         y, groups = y_full[keep], groups_full[keep]
-        log(f"data_fraction={fraction}: {len(keep)}/{len(y_full)} windows kept "
-            f"(stratified per patient)")
+        log(f"data_fraction={fraction}: {len(keep)}/{len(y_full)} windows kept ({how})")
     else:
         keep, y, groups = None, y_full, groups_full
 

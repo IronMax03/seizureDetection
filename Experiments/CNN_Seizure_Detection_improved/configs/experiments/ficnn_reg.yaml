@@ -2,3 +2,4 @@
 model: ficnn_reg
 preprocess: raw
 features: apen
+data_fraction: 0.5

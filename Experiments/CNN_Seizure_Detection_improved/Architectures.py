@@ -23,7 +23,7 @@ class FiLMBlock(nn.Module):
 
 class FiCNN(nn.Module):
     """FiLM-CNN conditioned on per-channel ApEn features (or unconditioned control)."""
-    def __init__(self, extra_features=0, n_classes=2):
+    def __init__(self, extra_features=0, n_classes=23):
         super().__init__()
         self.channels = [18, 15, 10, 10, 10]
         self.kernels  = [6, 5, 4, 4, 4]
@@ -77,7 +77,7 @@ class FiCNN(nn.Module):
 
 class FiCNN_reg(FiCNN):
     """FiCNN with dropout regularisation in conv blocks, FiLM generator and classifier."""
-    def __init__(self, extra_features=0, n_classes=2):
+    def __init__(self, extra_features=0, n_classes=23):
         super().__init__(extra_features, n_classes)
 
         self.blocks = nn.ModuleList([
@@ -111,7 +111,7 @@ class FiCRNN(nn.Module):
     Returns logits : (N, T, n_classes)
     The hidden state is reset to zero at the start of every sequence (stateless / Option A).
     """
-    def __init__(self, extra_features=0, n_classes=2, hidden=16):
+    def __init__(self, extra_features=0, n_classes=23, hidden=16):
         super().__init__()
         self.cnn = FiCNN_reg(extra_features, n_classes)
         # RNN input size = flattened CNN feature vector (40 for 256-sample windows)

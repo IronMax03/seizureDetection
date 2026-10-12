@@ -5,6 +5,7 @@ model: ficrnn
 preprocess: raw
 features: apen
 sequence_len: 32
+data_fraction: 0.5
 
 tune:
   n_trials: 8

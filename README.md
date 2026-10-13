@@ -1,9 +1,6 @@
 # seizureDetection
 
-Work in progress research repository for EEG preprocessing, feature extraction,
-and seizure classification. The project collects paper reproductions and
-experimental code while working toward a usable seizure-detection software
-application.
+Work-in-progress research repository developing an original architecture for EEG-based seizure detection. The project reproduces established methods from the literature as verified baselines, then builds on them through successive experiments toward a performant, deployable detector. The current best architecture is FiCRNN (see Latest Results); it is the leading candidate so far, not the final design the architecture is still evolving as experiments continue.
 
 > [!WARNING]
 > **This project and any future software produced from it are not intended for
@@ -14,21 +11,15 @@ application.
 
 ## Project objective
 
-The project has two connected objectives:
+The project has three connected objectives:
 
-1. Experiment with EEG preprocessing, signal-derived features, and neural
-    network architectures to identify a promising seizure-detection approach.
-2. Implement the resulting architecture as usable software, with a clear
-    interface and reproducible processing and inference pipeline.
-
-The repository combines reproducible baselines with experiments on artifact
-removal, entropy features, convolutional neural networks, and larger clinical
-EEG datasets. The architecture and software interface are still evolving.
+1. **Reproduce** established seizure-detection methods from the literature (CNN classification, entropy features, wavelet artifact removal) as verified baselines, confirming reported results before building on them.
+2. **Develop** an original architecture by iterating on these baselines — currently FiCRNN, which conditions a CNN–RNN on signal-derived entropy features evaluated honestly under patient-wise cross-validation and extreme class imbalance. The architecture is an active work in progress.
+3. **Deliver** the resulting architecture as usable software, with a reproducible preprocessing and inference pipeline and a clear interface.
 
 ## Latest Results
 
-The current best is **FiCRNN**: FiCNN with an RNN classifier, using FiLM
-conditioning on approximate entropy (ApEn). It was trained on raw CHB-MIT EEG
+The current best is **FiCRNN**: FiLM conditioning on CNN with an RNN classifier. the features used by FiLM are approximate entropy (ApEn) for each window. It was trained on raw CHB-MIT EEG
 with 1 s windows, sequences of 32 windows, 50% of the data, and evaluated with
 patient-wise 10-fold cross-validation.
 
@@ -38,10 +29,7 @@ patient-wise 10-fold cross-validation.
 | AUPRC             | 0.586 ± 0.236           |
 
 Seizure windows make up only ~0.1–0.7% of CHB-MIT, so balanced accuracy and
-AUPRC are the primary metrics; plain accuracy is not informative here. An
-earlier version used a cross-validation split that was not patient-wise and
-reported 92.91% balanced accuracy; that result came from data leakage and is
-superseded by the numbers above.
+AUPRC (area under the precision-recall curve) are the primary metrics; plain accuracy is not informative here. 
 
 <div align="center">
   <p><b>FiCRNN detailed architecture</b></p>
@@ -49,6 +37,29 @@ superseded by the numbers above.
   <p><b>FiCRNN unrolled over time</b></p>
   <img width="100%" alt="fig3" src="./doc/figs/FiCRNN/ficrnn_unrolled.png" />
 </div>
+
+### Architecture
+
+FiCRNN classifies EEG one 1-second window at a time, using the previous
+windows as context. It has two parts:
+
+1. **FiLM-CNN encoder.** A 1D CNN of five convolutional blocks turns each
+   23-channel window (256 samples) into a 40-dimensional feature vector.
+   A small FiLM generator maps the window's per-channel approximate entropy
+   (ApEn) to a scale γ and shift β for every channel of every block. These
+   modulate the normalized convolution outputs, so the entropy features steer
+   which patterns the CNN emphasises. The same encoder, with the same
+   weights, is applied to every window.
+2. **Recurrent classifier.** A unidirectional RNN (16 hidden units) reads the
+   sequence of window features and carries a hidden state from one window to
+   the next. A dropout and linear layer then outputs seizure / non-seizure
+   logits for every window. Because the RNN only looks backward, each
+   prediction uses only the current and past windows, which keeps the model
+   usable in real time.
+
+Regularisation includes channel dropout in the conv blocks, dropout in the
+FiLM generator and before the output layer, and a zero-initialised FiLM
+generator, so training starts from an unmodulated CNN.
 
 ## Repository structure
 ```text
@@ -72,18 +83,16 @@ datasets, entry points, and links to the individual READMEs.
 No datasets are included in this repository. The following datasets are used by the experiments:
 - **Bonn University EEG:** used by the CNN and entropy experiments.
 - **EEGdenoiseNet:** used to test artifact-removal methods.
-- **CHB-MIT Scalp EEG Database:** currently being integrated for a larger,
-  clinically oriented seizure/non-seizure dataset.
-  preprocessing work.
+- **CHB-MIT Scalp EEG Database:** used as 1 second windows for FiCRNN.
 
 ## TODO
 - [x] Reproduce Acharya CNN on Bonn EEG.
 - [x] Reproduce & evaluate entropy features on Bonn EEG.
 - [x] Reproduce wavelet based artifact removal on EEGdenoiseNet.
 - [x] Integrate CHB-MIT Scalp EEG Database and window it for seizure/non-seizure analysis.
-- [ ] Experiment with surface Laplacian preprocessing on CHB-MIT Scalp EEG Database.
 - [x] Extend Acharya CNN with FiLM conditioning and denoising preprocessing using CHB-MIT Scalp EEG Database.
 - [x] Experiment with recurrent neural networks integrated in the CNN architecture.
+- [ ] Experiment with surface Laplacian preprocessing on CHB-MIT Scalp EEG Database.
 
 - [ ] implement the final architecture in C++.
 - [ ] document the resulting C++ implementation and provide a command line interface for inference.

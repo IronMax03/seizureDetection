@@ -50,13 +50,36 @@ seizure windows vs. 50% in Bonn, so balanced accuracy and AUPRC are the primary
 metrics.
 
 <div align="center">
-  <p><b>Figure 1 — FiCRNN training and validation results</b></p>
+  <p><b>FiCRNN training and validation results</b></p>
   <img width="100%" alt="fig1" src="graphs/FiCRNN_1.png" />
-  <p><b>Figure 2 — FiCRNN detailed architecture</b></p>
+  <p><b>FiCRNN detailed architecture</b></p>
   <img width="100%" alt="fig2" src="../../doc/figs/FiCRNN/ficrnn_detailed.png" />
-  <p><b>Figure 3 — FiCRNN unrolled over time</b></p>
+  <p><b>FiCRNN unrolled over time</b></p>
   <img width="100%" alt="fig3" src="../../doc/figs/FiCRNN/ficrnn_unrolled.png" />
 </div>
+
+### Architecture
+
+FiCRNN classifies EEG one 1-second window at a time, using the previous
+windows as context. It has two parts:
+
+1. **FiLM-CNN encoder.** A 1D CNN of five convolutional blocks turns each
+   23-channel window (256 samples) into a 40-dimensional feature vector.
+   A small FiLM generator maps the window's per-channel approximate entropy
+   (ApEn) to a scale γ and shift β for every channel of every block. These
+   modulate the normalized convolution outputs, so the entropy features steer
+   which patterns the CNN emphasises. The same encoder, with the same
+   weights, is applied to every window.
+2. **Recurrent classifier.** A unidirectional RNN (16 hidden units) reads the
+   sequence of window features and carries a hidden state from one window to
+   the next. A dropout and linear layer then outputs seizure / non-seizure
+   logits for every window. Because the RNN only looks backward, each
+   prediction uses only the current and past windows, which keeps the model
+   usable in real time.
+
+Regularisation includes channel dropout in the conv blocks, dropout in the
+FiLM generator and before the output layer, and a zero-initialised FiLM
+generator, so training starts from an unmodulated CNN.
 
 ---
 ### Observation

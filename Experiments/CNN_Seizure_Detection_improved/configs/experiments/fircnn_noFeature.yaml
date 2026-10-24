@@ -1,0 +1,15 @@
+# Experiment: FiLM-CNN without conditioning (control), raw EEG
+model: ficrnn
+preprocess: raw
+features: none
+sequence_len: 32
+data_fraction: 0.5
+
+tune:
+  n_trials: 8
+  n_folds: 1
+  n_epochs: 10
+  search:
+    lr: [1.0e-4, 5.0e-4, 1.0e-3, 3.0e-3]
+    weight_decay: [0.0, 1.0e-4, 1.0e-3]
+    batch_size: [32, 64, 128]

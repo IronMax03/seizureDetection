@@ -580,7 +580,7 @@ def _make_batch_idx(subset_idx, groups, seq_len, bs, seed, store_device):
 
     if seq_len == 1:
         idx_t  = torch.as_tensor(subset_idx, device=store_device)
-        perm   = idx_t[torch.randperm(len(idx_t), generator=rng, device=store_device)]
+        perm   = idx_t[torch.randperm(len(idx_t), generator=rng).to(store_device)]
         return [perm[s:s + bs] for s in range(0, len(perm) - bs + 1, bs)]
     else:
         seqs   = make_sequences(groups, seq_len, subset_idx)   # list of int arrays (T,)

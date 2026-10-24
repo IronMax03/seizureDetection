@@ -23,11 +23,11 @@ class FiLMBlock(nn.Module):
 
 class FiCNN(nn.Module):
     """FiLM-CNN conditioned on per-channel ApEn features (or unconditioned control)."""
-    def __init__(self, extra_features=0, n_classes=23):
+    def __init__(self, extra_features=0, n_classes=23, n_channels=23):
         super().__init__()
         self.channels = [18, 15, 10, 10, 10]
         self.kernels  = [6, 5, 4, 4, 4]
-        self.in_chs   = [23, 18, 15, 10, 10]
+        self.in_chs   = [n_channels, 18, 15, 10, 10]
 
         self.blocks = nn.ModuleList([
             FiLMBlock(ic, oc, k)
@@ -77,8 +77,8 @@ class FiCNN(nn.Module):
 
 class FiCNN_reg(FiCNN):
     """FiCNN with dropout regularisation in conv blocks, FiLM generator and classifier."""
-    def __init__(self, extra_features=0, n_classes=23):
-        super().__init__(extra_features, n_classes)
+    def __init__(self, extra_features=0, n_classes=23, n_channels=23):
+        super().__init__(extra_features, n_classes, n_channels)
 
         self.blocks = nn.ModuleList([
             FiLMBlock(ic, oc, k, dropout_p=0.1)
@@ -111,9 +111,9 @@ class FiCRNN(nn.Module):
     Returns logits : (N, T, n_classes)
     The hidden state is reset to zero at the start of every sequence (stateless / Option A).
     """
-    def __init__(self, extra_features=0, n_classes=23, hidden=16):
+    def __init__(self, extra_features=0, n_classes=23, hidden=16, n_channels=23):
         super().__init__()
-        self.cnn = FiCNN_reg(extra_features, n_classes)
+        self.cnn = FiCNN_reg(extra_features, n_classes, n_channels)
         # RNN input size = flattened CNN feature vector (40 for 256-sample windows)
         self.rnn = nn.RNN(input_size=self.cnn.flat_size, hidden_size=hidden, batch_first=True)
         self.classifier = nn.Sequential(
@@ -145,3 +145,19 @@ class FiCRNN(nn.Module):
         z   = self._cnn_features(x, f).reshape(N, T, -1)    # (N, T, 40)
         out, _ = self.rnn(z)                                 # (N, T, hidden); h0=None = zeros
         return self.classifier(out)                          # (N, T, n_classes)
+
+
+class FiCRNN_GRU(FiCRNN):
+    """
+    FiLM-CNN feature extractor followed by an GRU over a sequence of windows.
+
+    Expects input as a sequence of T windows per sample:
+      x_seq : (N, T, 23, W)   — EEG windows
+      f_seq : (N, T, F)        — conditioning features (or zeros if F=0)
+
+    Returns logits : (N, T, n_classes)
+    The hidden state is reset to zero at the start of every sequence (stateless / Option A).
+    """
+    def __init__(self, extra_features=0, n_classes=23, hidden=16, n_channels=23):
+        super().__init__(extra_features, n_classes, hidden, n_channels)
+        self.rnn = nn.GRU(input_size=self.cnn.flat_size, hidden_size=hidden, batch_first=True)

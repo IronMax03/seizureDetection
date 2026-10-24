@@ -19,6 +19,7 @@ Config system (each layer overrides the previous):
 Usage
   python train_gpu.py --exp ficnn_apen
   python train_gpu.py --exp ficnn_apen --tune
+  python train_gpu.py --exp ficnn_apen ficrnn_apen    # several experiments, one after the other
   python train_gpu.py --exp ficrnn_apen              # sequence model, sequence_len set in yaml
   python train_gpu.py --exp ficnn_apen --lr 1e-3 --epochs 50
   python train_gpu.py --list-experiments
@@ -51,17 +52,18 @@ from sklearn.model_selection import LeaveOneGroupOut, StratifiedGroupKFold
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------------
 # Model registry – add new architectures here (one line each).
 # ---------------------------------------------------------------------------
-from Architectures import FiCNN, FiCNN_reg, FiCRNN  # noqa: E402
+from Architectures import FiCNN, FiCNN_reg, FiCRNN, FiCRNN_GRU
 
 MODEL_REGISTRY = {
-    "ficnn":     FiCNN,
-    "ficnn_reg": FiCNN_reg,
-    "ficrnn":    FiCRNN,
+    "ficnn":      FiCNN,
+    "ficnn_reg":  FiCNN_reg,
+    "ficrnn":     FiCRNN,
+    "ficrnn_gru": FiCRNN_GRU
 }
 
 # ---------------------------------------------------------------------------
@@ -627,7 +629,7 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, groups,
 
     va_idx = _make_eval_idx(va, groups, seq_len, store.index_device)
 
-    model = ModelCls(extra_features=n_feat, n_classes=K).to(device)
+    model = ModelCls(extra_features=n_feat, n_classes=K, n_channels=cfg["n_channels"]).to(device)
     opt   = torch.optim.AdamW(model.parameters(),
                               lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     bs         = cfg["batch_size"]
@@ -759,7 +761,8 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
         va_idx = _make_eval_idx(va, groups, seq_len, store.index_device)
 
         torch.manual_seed(cfg_dict["seed"] + fold)
-        model = ModelCls(extra_features=n_feat, n_classes=K).to(device)
+        model = ModelCls(extra_features=n_feat, n_classes=K,
+                         n_channels=cfg_dict["n_channels"]).to(device)
         opt   = torch.optim.AdamW(model.parameters(),
                                   lr=cfg_dict["lr"], weight_decay=cfg_dict["weight_decay"])
 
@@ -967,8 +970,9 @@ def parse_args():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    p.add_argument("--exp", default=None,
-                   help="experiment name (stem of a yaml in configs/experiments/)")
+    p.add_argument("--exp", nargs="+", default=None,
+                   help="one or more experiment names (stems of yamls in configs/experiments/), "
+                        "run one after the other")
     p.add_argument("--list-experiments", action="store_true")
     p.add_argument("--tune", action="store_true",
                    help="run a quick random search before full CV")
@@ -1015,6 +1019,22 @@ def main():
             f"Available: {exps or '(none)'}\n"
             "Use --list-experiments for details.")
 
+    unknown = [e for e in args.exp if e not in _available_experiments()]
+    if unknown:
+        raise SystemExit(f"Experiment(s) not found: {unknown}\n"
+                         f"Available: {_available_experiments()}")
+
+    exps = args.exp
+    for i, exp in enumerate(exps, 1):
+        if len(exps) > 1:
+            log(f"##### experiment {i}/{len(exps)}: {exp} #####")
+        args.exp = exp
+        run_experiment(args)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()   # free the previous experiment's VRAM before the next
+
+
+def run_experiment(args):
     cli_overrides = {
         "folds": args.folds, "epochs": args.epochs, "batch_size": args.batch_size,
         "eval_batch_size": args.eval_batch_size, "lr": args.lr,
@@ -1058,12 +1078,15 @@ def main():
 
     srcs   = [data_dir / p / "X.npy" for p in patients]
     shapes = [check_input_npy(s) for s in srcs]
-    if len({s[1:] for s in shapes}) != 1:
+    single = bool(cfg.get("single_chanel_only", False))
+    # single channel: patients only need the same window length, channel counts may differ
+    if len({s[2:] if single else s[1:] for s in shapes}) != 1:
         raise SystemExit(f"patients have different window shapes: "
                          f"{dict(zip(patients, shapes))}")
 
     y_full, groups_full = load_labels(data_dir, patients, [s[0] for s in shapes])
     cfg["window_len"] = int(shapes[0][2])
+    cfg["n_channels"] = 1 if single else int(shapes[0][1])
 
     fraction = float(cfg.get("data_fraction", 1.0))
     if fraction < 1.0:
@@ -1081,13 +1104,16 @@ def main():
 
     log(f"data: {len(y)} windows | seizure {int((y == y.max()).sum())} "
         f"({100 * (y == y.max()).mean():.2f}%) | "
-        f"{len(y) * shapes[0][1] * shapes[0][2] * 2 / 2**30:.1f} GB as float16")
+        f"{len(y) * cfg['n_channels'] * shapes[0][2] * 2 / 2**30:.1f} GB as float16")
+    if single:
+        log("channels     : first channel only (single_chanel_only: true)")
 
     if len(cfg["class_names"]) != int(y.max()) + 1:
         cfg["class_names"] = [str(i) for i in range(int(y.max()) + 1)]
 
     def parts(kind):
-        return [build_patient_cache(kind, p, s, cache_dir, cfg["workers"])
+        # caches hold all channels; slicing a memmap is a lazy view, nothing is loaded
+        return [build_patient_cache(kind, p, s, cache_dir, cfg["workers"])[:, :cfg["n_channels"]]
                 for p, s in zip(patients, srcs)]
 
     eeg_parts = parts(cfg["preprocess"])

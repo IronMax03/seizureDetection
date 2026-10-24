@@ -6,6 +6,7 @@
 # power         : class-weight exponent 1=inv-freq 0.5=sqrt 0=none
 # data_on       : where EEG windows live (auto | gpu | ram)
 # workers       : null = os.cpu_count()-1; set an int to override
+# single_chanel_only : true = train on the first EEG channel only; false = all channels
 folds: 10
 seed: 123
 epochs: 30
@@ -18,6 +19,7 @@ power: 0.5
 patience: 0
 data_on: auto
 workers: null
+single_chanel_only: false
 fs: 256.0
 class_names:
 - normal

@@ -1,0 +1,128 @@
+{
+  "experiment": "ficrnn_gru_noFeatures_1ch",
+  "best_epoch": {
+    "bacc": [
+      0.7049816241939665,
+      0.11501925658516685
+    ],
+    "auprc": [
+      0.5663108021943861,
+      0.23422019155397444
+    ]
+  },
+  "last_epoch": {
+    "bacc": [
+      0.6450171620761271,
+      0.13581615246707449
+    ],
+    "auprc": [
+      0.41188042691386934,
+      0.24551059134914574
+    ]
+  },
+  "pooled_best": {
+    "sensitivity": 0.4357492218763895,
+    "specificity": 0.9975460984894934,
+    "precision": 0.35494386091995656,
+    "fp_per_hour": 8.806755747000132,
+    "confusion_matrix": [
+      [
+        724002,
+        1781
+      ],
+      [
+        1269,
+        980
+      ]
+    ]
+  },
+  "folds_best": [
+    {
+      "fold": 1,
+      "epoch": 2,
+      "bacc": 0.6106176812993647,
+      "auprc": 0.40458293615481133
+    },
+    {
+      "fold": 2,
+      "epoch": 29,
+      "bacc": 0.7401960784313726,
+      "auprc": 0.8298348969298293
+    },
+    {
+      "fold": 3,
+      "epoch": 5,
+      "bacc": 0.7580255778963206,
+      "auprc": 0.58334893171567
+    },
+    {
+      "fold": 4,
+      "epoch": 16,
+      "bacc": 0.9059801591846084,
+      "auprc": 0.7890356432112571
+    },
+    {
+      "fold": 5,
+      "epoch": 2,
+      "bacc": 0.5293640450363541,
+      "auprc": 0.001405025487013439
+    },
+    {
+      "fold": 6,
+      "epoch": 21,
+      "bacc": 0.7994384326844987,
+      "auprc": 0.7142967211428454
+    },
+    {
+      "fold": 7,
+      "epoch": 4,
+      "bacc": 0.6824072844055085,
+      "auprc": 0.6879138163004068
+    },
+    {
+      "fold": 8,
+      "epoch": 19,
+      "bacc": 0.802411198070998,
+      "auprc": 0.721114365033105
+    },
+    {
+      "fold": 9,
+      "epoch": 11,
+      "bacc": 0.5352317823526901,
+      "auprc": 0.5052463145978575
+    },
+    {
+      "fold": 10,
+      "epoch": 8,
+      "bacc": 0.6861440025779493,
+      "auprc": 0.4263293713710654
+    }
+  ],
+  "config": {
+    "folds": 10,
+    "seed": 123,
+    "epochs": 30,
+    "batch_size": 32,
+    "eval_batch_size": 4096,
+    "lr": 0.001,
+    "weight_decay": 0.001,
+    "clip": 1.0,
+    "power": 0.5,
+    "patience": 0,
+    "data_on": "auto",
+    "workers": 23,
+    "single_chanel_only": true,
+    "fs": 256.0,
+    "class_names": [
+      "normal",
+      "seizure"
+    ],
+    "sequence_len": 32,
+    "model": "ficrnn_gru",
+    "preprocess": "raw",
+    "features": "none",
+    "data_fraction": 0.5,
+    "window_len": 256,
+    "n_channels": 1
+  }
+}

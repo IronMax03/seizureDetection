@@ -7,6 +7,9 @@ python train_gpu.py --list-experiments
 # run an experiment with default hyperparams
 python train_gpu.py --exp ficnn_apen
 
+# run several experiments one after the other
+python train_gpu.py --exp ficnn_apen ficrnn_apen ficrnn_gru_apen_1ch
+
 # run a quick hyperparameter search first, then full CV
 python train_gpu.py --exp ficnn_apen --tune
 
@@ -22,11 +25,11 @@ Results land in `results/<exp_name>/` — one subfolder per experiment run.
 
 ## 1. Define your model in `Architectures.py`
 
-The only required signature is `(extra_features, n_classes)`:
+The required signature is `(extra_features, n_classes, n_channels)`. `n_channels` is the number of EEG input channels (1 with `single_chanel_only: true`):
 
 ```python
 class MyModel(nn.Module):
-    def __init__(self, extra_features=0, n_classes=2):
+    def __init__(self, extra_features=0, n_classes=2, n_channels=23):
         ...
 
     def forward(self, x_serie, x_features):
@@ -67,6 +70,9 @@ features: apen       # apen | none (conditioning signal; none = control)
 data_dir: /path/to/my/npy_data
 cache_dir: /path/to/cache
 out_dir: /path/to/results
+
+# optional: train on the first EEG channel only (default false = all channels)
+single_chanel_only: true
 
 # optional: override base hyperparams for this experiment
 epochs: 40
@@ -121,6 +127,7 @@ configs/default_training_config.yaml      ← base hyperparams (lr, wd, epochs, 
 | `data_on` | auto | Where EEG windows live: `auto` / `gpu` / `ram` |
 | `seed` | 123 | Random seed |
 | `workers` | cpu_count−1 | Parallel workers for cache building |
+| `single_chanel_only` | `false` | `true` = train on the first EEG channel of each patient only (patients may then have different channel counts); `false` = all channels |
 | `fs` | 256.0 | Sampling rate Hz (used for FP/hour reporting only) |
 | `data_fraction` | `1.0` | Fraction of windows to keep per patient (stratified by class). Useful values: `0.75`, `0.5`, `0.25`, `0.1` |
 | `data_dir` | `../CHB-MIT_Formating/npy_data` | Path to the folder containing per-patient `X.npy`/`y.npy` |

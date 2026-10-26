@@ -82,8 +82,8 @@ _DEFAULT_TUNE = {
     "n_folds":  1,
     "n_epochs": 10,
     "search": {
-        "lr":           [1e-4, 5e-4, 1e-3, 3e-3],
-        "weight_decay": [0.0,  1e-4, 1e-3],
+        "lr":           {"low": 1e-5, "high": 1e-2, "log": True},
+        "weight_decay": {"low": 1e-6, "high": 1e-2, "log": True},  # log range can't include 0
         "batch_size":   [128,  256,  512],
     },
 }
@@ -704,9 +704,13 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
 
     def objective(trial):
         trial_cfg = dict(cfg_dict)
-        for param, choices in search.items():
-            trial_cfg[param] = trial.suggest_categorical(param, choices)
-        tag = (f"lr={trial_cfg['lr']:.0e}  wd={trial_cfg['weight_decay']:.0e}"
+        for param, spec in search.items():
+            if isinstance(spec, dict):   # {low, high, log}: continuous range
+                trial_cfg[param] = trial.suggest_float(param, float(spec["low"]), float(spec["high"]),
+                                                       log=spec.get("log", False))
+            else:                        # list: pick one of the choices
+                trial_cfg[param] = trial.suggest_categorical(param, spec)
+        tag = (f"lr={trial_cfg['lr']:.1e}  wd={trial_cfg['weight_decay']:.1e}"
                f"  bs={trial_cfg['batch_size']}")
         scores = []
         try:

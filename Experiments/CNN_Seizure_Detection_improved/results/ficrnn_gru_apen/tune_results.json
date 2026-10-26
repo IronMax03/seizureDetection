@@ -1,85 +1,93 @@
 {
   "best": {
-    "trial": 6,
+    "trial": 7,
     "params": {
-      "lr": 0.001,
-      "weight_decay": 0.001,
-      "batch_size": 32
+      "lr": 0.003,
+      "weight_decay": 0.0,
+      "batch_size": 128
     },
-    "auprc": 0.806409821552939
+    "auprc": 0.8357431066583715
   },
   "all_trials": [
     {
       "trial": 1,
       "params": {
         "lr": 0.0001,
-        "weight_decay": 0.0001,
+        "weight_decay": 0.001,
         "batch_size": 32
       },
-      "auprc": 0.7853436840145491
+      "state": "COMPLETE",
+      "auprc": 0.7918044327818241
     },
     {
       "trial": 2,
       "params": {
-        "lr": 0.003,
+        "lr": 0.0005,
         "weight_decay": 0.0001,
-        "batch_size": 32
+        "batch_size": 128
       },
-      "auprc": 0.7617786028182741
+      "state": "COMPLETE",
+      "auprc": 0.8104214799383966
     },
     {
       "trial": 3,
       "params": {
-        "lr": 0.0001,
-        "weight_decay": 0.0001,
+        "lr": 0.0005,
+        "weight_decay": 0.0,
         "batch_size": 128
       },
-      "auprc": 0.6798159831738251
+      "state": "PRUNED",
+      "auprc": 0.764664712324768
     },
     {
       "trial": 4,
       "params": {
-        "lr": 0.001,
-        "weight_decay": 0.0001,
-        "batch_size": 32
+        "lr": 0.003,
+        "weight_decay": 0.001,
+        "batch_size": 64
       },
-      "auprc": 0.7845272540678551
+      "state": "PRUNED",
+      "auprc": 0.784182254983467
     },
     {
       "trial": 5,
       "params": {
-        "lr": 0.0005,
+        "lr": 0.0001,
         "weight_decay": 0.0,
-        "batch_size": 64
+        "batch_size": 32
       },
-      "auprc": 0.7872453599651122
+      "state": "PRUNED",
+      "auprc": 0.028105671571690718
     },
     {
       "trial": 6,
       "params": {
-        "lr": 0.001,
+        "lr": 0.0005,
         "weight_decay": 0.001,
-        "batch_size": 32
+        "batch_size": 64
       },
-      "auprc": 0.806409821552939
+      "state": "PRUNED",
+      "auprc": 0.710831816915089
     },
     {
       "trial": 7,
       "params": {
-        "lr": 0.0005,
+        "lr": 0.003,
         "weight_decay": 0.0,
-        "batch_size": 64
+        "batch_size": 128
       },
-      "auprc": 0.8052982259603414
+      "state": "COMPLETE",
+      "auprc": 0.8357431066583715
     },
     {
       "trial": 8,
       "params": {
-        "lr": 0.0001,
-        "weight_decay": 0.001,
-        "batch_size": 64
+        "lr": 0.0005,
+        "weight_decay": 0.0001,
+        "batch_size": 128
       },
-      "auprc": 0.7151274213452551
+      "state": "PRUNED",
+      "auprc": 0.6406212821332429
     }
   ]
 }

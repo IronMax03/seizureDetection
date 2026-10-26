@@ -6,7 +6,7 @@ Pipeline
   0. Check  : every X.npy validated against its header (truncated files = clear error).
   1. EEG    : X.npy per patient -> float16 uV cache (cache/raw/<p>.npy or cache/atar/<p>.npy).
   2. ApEn   : approximate entropy per (window, channel), cached per patient (cache/apen/<p>.npy).
-  3. Tune   : optional quick random search over lr/wd/batch_size (--tune flag).
+  3. Tune   : optional Optuna TPE + successive-halving search over lr/wd/batch_size (--tune flag).
   4. Train  : patient-stratified k-fold CV.  Data lives on GPU when it fits, else streamed from
               pinned RAM.  Class-weighted loss, AdamW, grad clipping, best-epoch checkpoint.
   5. Output : results/<exp_name>/  -> summary.json, history.json, summary.png, fold*.pt
@@ -36,12 +36,12 @@ import argparse
 import copy
 import json
 import os
-import random
 import shutil
 import time
 from multiprocessing import Pool
 from pathlib import Path
 
+import optuna
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -614,8 +614,9 @@ def _make_eval_idx(subset_idx, groups, seq_len, store_device):
 
 
 def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, groups,
-                  device, n_feat, K, pos, n_epochs, seq_len):
-    """Train for n_epochs on one fold; return best val AUPRC."""
+                  device, n_feat, K, pos, n_epochs, seq_len, trial=None, step0=0):
+    """Train for n_epochs on one fold; return best val AUPRC.
+    If an Optuna trial is given, report each epoch and raise TrialPruned when told to."""
     tr_d    = torch.as_tensor(tr, device=device)
     counts  = torch.bincount(y_dev[tr_d], minlength=K).float()
     class_w = (counts.sum() / (K * counts.clamp(min=1))) ** cfg["power"]
@@ -657,6 +658,15 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, groups,
         if score > best_auprc:
             best_auprc = score
 
+        if trial is not None:
+            trial.report(best_auprc, step0 + epoch)
+            if trial.should_prune():
+                import optuna
+                del model, opt
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                raise optuna.TrialPruned()
+
     del model, opt
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -668,7 +678,7 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, groups,
 # =============================================================================
 def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_dir):
     """
-    Random search over lr / weight_decay / batch_size.
+    Optuna TPE search with successive-halving pruning over lr / weight_decay / batch_size.
     Updates cfg_dict in-place with the winning params, saves tune_results.json.
     """
     search   = tune_cfg["search"]
@@ -686,32 +696,42 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
     all_splits  = make_splits(y, groups, max(cfg_dict["folds"], n_folds + 1), cfg_dict["seed"])
     tune_splits = all_splits[:n_folds]
 
-    rng     = random.Random(cfg_dict["seed"])
-    results = []
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    log(f"[tune] {n_trials} trials × {n_folds} fold(s) × {n_epochs} epochs"
-        f"  (sequence_len={seq_len})")
+    log(f"[tune] {n_trials} trials × {n_folds} fold(s) × ≤{n_epochs} epochs"
+        f"  (successive halving, sequence_len={seq_len})")
     log(f"[tune] search space: { {k: v for k, v in search.items()} }")
 
-    for trial in range(n_trials):
+    def objective(trial):
         trial_cfg = dict(cfg_dict)
         for param, choices in search.items():
-            trial_cfg[param] = rng.choice(choices)
-
+            trial_cfg[param] = trial.suggest_categorical(param, choices)
         tag = (f"lr={trial_cfg['lr']:.0e}  wd={trial_cfg['weight_decay']:.0e}"
                f"  bs={trial_cfg['batch_size']}")
         scores = []
-        for tr, va in tune_splits:
-            s = _run_one_fold(ModelCls, trial_cfg, store, f_dev, y_dev,
-                              tr, va, groups, device, n_feat, K, pos,
-                              n_epochs, seq_len)
-            scores.append(s)
+        try:
+            for i, (tr, va) in enumerate(tune_splits):
+                scores.append(_run_one_fold(ModelCls, trial_cfg, store, f_dev, y_dev,
+                                            tr, va, groups, device, n_feat, K, pos,
+                                            n_epochs, seq_len, trial, i * n_epochs))
+        except optuna.TrialPruned:
+            log(f"  trial {trial.number + 1:2d}/{n_trials} | {tag} | pruned")
+            raise
         mean_auprc = float(np.mean(scores))
-        results.append({"trial": trial + 1, "params": {p: trial_cfg[p] for p in search},
-                        "auprc": mean_auprc})
-        log(f"  trial {trial + 1:2d}/{n_trials} | {tag} | AUPRC {mean_auprc:.4f}")
+        log(f"  trial {trial.number + 1:2d}/{n_trials} | {tag} | AUPRC {mean_auprc:.4f}")
+        return mean_auprc
 
-    best = max(results, key=lambda r: r["auprc"])
+    study = optuna.create_study(direction="maximize",
+                                sampler=optuna.samplers.TPESampler(seed=cfg_dict["seed"]),
+                                pruner=optuna.pruners.SuccessiveHalvingPruner())
+    study.optimize(objective, n_trials=n_trials)
+
+    results = [{"trial": t.number + 1, "params": t.params, "state": t.state.name,
+                "auprc": t.value if t.value is not None
+                         else max(t.intermediate_values.values(), default=None)}
+               for t in study.trials]
+    bt   = study.best_trial
+    best = {"trial": bt.number + 1, "params": bt.params, "auprc": bt.value}
     log(f"[tune] best trial {best['trial']}: {best['params']}  AUPRC {best['auprc']:.4f}")
 
     for param, val in best["params"].items():
@@ -826,8 +846,11 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
         torch.save(best["state"], out_dir / f"fold{fold + 1}.pt")
         cm_best += confusion_matrix(best["labels"], best["preds"], labels=list(range(K)))
         e = best["epoch"]
+        is_pos = np.asarray(best["labels"]) == pos
+        sens = float((np.asarray(best["preds"])[is_pos] == pos).mean()) if is_pos.any() else float("nan")
         best_rows.append({"fold": fold + 1, "epoch": e,
-                          "bacc": hist["val_bacc"][e], "auprc": hist["val_auprc"][e]})
+                          "bacc": hist["val_bacc"][e], "auprc": hist["val_auprc"][e],
+                          "sensitivity": sens})
         last_rows.append({"fold": fold + 1,
                           "bacc": hist["val_bacc"][-1], "auprc": hist["val_auprc"][-1]})
         histories.append(hist)
@@ -975,7 +998,7 @@ def parse_args():
                         "run one after the other")
     p.add_argument("--list-experiments", action="store_true")
     p.add_argument("--tune", action="store_true",
-                   help="run a quick random search before full CV")
+                   help="run an Optuna successive-halving search before full CV")
 
     p.add_argument("--data-dir",  default=None)
     p.add_argument("--cache-dir", default=None)

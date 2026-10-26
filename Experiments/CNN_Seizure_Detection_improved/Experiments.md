@@ -1,6 +1,8 @@
 # Quick start
 
 ```bash
+pip install optuna  # only needed for --tune
+
 # list available experiments
 python train_gpu.py --list-experiments
 
@@ -10,16 +12,86 @@ python train_gpu.py --exp ficnn_apen
 # run several experiments one after the other
 python train_gpu.py --exp ficnn_apen ficrnn_apen ficrnn_gru_apen_1ch
 
-# run a quick hyperparameter search first, then full CV
+# Optuna successive-halving search first, then full CV
 python train_gpu.py --exp ficnn_apen --tune
 
 # override any hyperparam on the fly
 python train_gpu.py --exp ficnn_apen --lr 1e-3 --epochs 50 --folds 5
+
+# train on a subset of patients only
+python train_gpu.py --exp ficnn_apen --patients chb01 chb02
 ```
 
 Results land in `results/<exp_name>/` — one subfolder per experiment run.
 
----
+
+# CLI reference
+
+**Run control**
+
+| Flag | Description |
+|---|---|
+| `--exp NAME [NAME …]` | One or more experiment names (stems of yamls in `configs/experiments/`), run one after the other |
+| `--list-experiments` | Print the available experiments and exit |
+| `--tune` | Run an Optuna successive-halving search before full CV (see [Hyperparameter tuning](#hyperparameter-tuning---tune)) |
+
+**Data / paths**
+
+| Flag | Description |
+|---|---|
+| `--data-dir PATH` | Folder containing per-patient `X.npy`/`y.npy` (yaml key `data_dir`) |
+| `--cache-dir PATH` | Directory for preprocessed caches (yaml key `cache_dir`) |
+| `--out-dir PATH` | Root directory for run outputs (yaml key `out_dir`) |
+| `--patients ID [ID …]` | Patient folder names, e.g. `chb01 chb02`. Default: every folder with `X.npy`/`y.npy`. **Needs ≥ 2 patients**: folds split by patient, so a single patient raises a `LeaveOneGroupOut` ValueError |
+
+**Hyperparameter overrides** (each overrides the yaml key of the same meaning, see [Config system](#config-system))
+
+| Flag | Yaml key |
+|---|---|
+| `--folds INT` | `folds` |
+| `--epochs INT` | `epochs` |
+| `--batch-size INT` | `batch_size` |
+| `--eval-batch-size INT` | `eval_batch_size` |
+| `--lr FLOAT` | `lr` |
+| `--weight-decay FLOAT` | `weight_decay` |
+| `--clip FLOAT` | `clip` |
+| `--power FLOAT` | `power` |
+| `--patience INT` | `patience` |
+| `--seed INT` | `seed` |
+| `--workers INT` | `workers` |
+| `--fs FLOAT` | `fs` |
+| `--data-on {auto,gpu,ram}` | `data_on` |
+| `--class-names NAME [NAME …]` | `class_names` |
+| `--sequence-len INT` | `sequence_len` |
+
+Precedence: CLI flag > experiment yaml > base yaml. With `--tune`, the winning `search` values then replace these values before full CV.
+
+
+# Hyperparameter tuning (`--tune`)
+
+`--tune` tries several hyperparameter combinations from `tune.search` using **successive halving**: every combination starts training, and the weaker ones are stopped early so the training time goes to the most promising ones. The best combination is then used for the full CV run.
+
+**`tune:` keys** (in the experiment yaml):
+
+| Key | Default | Description |
+|---|---|---|
+| `n_trials` | 8 | Total trials, pruned ones included. 20–30 recommended |
+| `n_folds` | 1 | Patient folds per trial |
+| `n_epochs` | 10 | Maximum epochs per fold per trial |
+| `search` | `lr`, `weight_decay`, `batch_size` | Any base-config key mapped to a list of choices, except `sequence_len`, `folds`, `seed` |
+
+Gotchas:
+
+- A `search` block in the yaml **replaces** the default search space, it is not merged. List every key you want searched.
+- The first trial is never pruned.
+- Nothing prints during a trial, only one line per finished or pruned trial:
+  ```
+  [tune] 20 trials × 1 fold(s) × ≤10 epochs  (successive halving, sequence_len=1)
+    trial  1/20 | lr=3e-04  wd=1e-04  bs=256 | AUPRC 0.4123
+    trial  2/20 | lr=3e-03  wd=0e+00  bs=512 | pruned
+  ```
+- Pruner settings are Optuna defaults and cannot be set from the config.
+
 
 # Setting up a new experiment
 
@@ -80,9 +152,9 @@ folds: 5
 
 # optional: hyperparameter search config (only used with --tune)
 tune:
-  n_trials: 8        # random configs to evaluate
+  n_trials: 20       # total trials (pruned ones included)
   n_folds: 1         # folds per trial (1 = fast signal)
-  n_epochs: 10       # epochs per trial
+  n_epochs: 10       # max epochs per trial
   search:
     lr: [1.0e-4, 5.0e-4, 1.0e-3, 3.0e-3]
     weight_decay: [0.0, 1.0e-4, 1.0e-3]
@@ -99,7 +171,6 @@ python train_gpu.py --exp mymodel_apen --tune
 python train_gpu.py --exp mymodel_apen
 ```
 
----
 
 # Config system
 
@@ -128,6 +199,7 @@ configs/default_training_config.yaml      ← base hyperparams (lr, wd, epochs, 
 | `seed` | 123 | Random seed |
 | `workers` | cpu_count−1 | Parallel workers for cache building |
 | `single_chanel_only` | `false` | `true` = train on the first EEG channel of each patient only (patients may then have different channel counts); `false` = all channels |
+| `sequence_len` | 1 | Windows per RNN sequence; >1 for FiCRNN, 1 = window-independent (FiCNN) |
 | `fs` | 256.0 | Sampling rate Hz (used for FP/hour reporting only) |
 | `data_fraction` | `1.0` | Fraction of windows to keep per patient (stratified by class). Useful values: `0.75`, `0.5`, `0.25`, `0.1` |
 | `data_dir` | `../CHB-MIT_Formating/npy_data` | Path to the folder containing per-patient `X.npy`/`y.npy` |
@@ -136,7 +208,6 @@ configs/default_training_config.yaml      ← base hyperparams (lr, wd, epochs, 
 
 Path keys (`data_dir`, `cache_dir`, `out_dir`) are not in the base config by default — set them only in experiment yamls where you need to override the defaults, or pass `--data-dir` / `--cache-dir` / `--out-dir` on the CLI.
 
----
 
 # Output files
 
@@ -148,6 +219,4 @@ After a run, `results/<exp_name>/` contains:
 | `history.json` | Per-fold, per-epoch loss and metrics |
 | `summary.png` | Loss curves, validation metrics, confusion matrix |
 | `fold1.pt … foldN.pt` | Best-epoch model weights per fold |
-| `tune_results.json` | (only with `--tune`) All trial results + winning params |
-
----
+| `tune_results.json` | (only with `--tune`) All trials (params, state `COMPLETE`/`PRUNED`, best score reached) + winning params |

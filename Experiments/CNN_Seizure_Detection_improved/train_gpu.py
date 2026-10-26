@@ -6,7 +6,8 @@ Pipeline
   0. Check  : every X.npy validated against its header (truncated files = clear error).
   1. EEG    : X.npy per patient -> float16 uV cache (cache/raw/<p>.npy or cache/atar/<p>.npy).
   2. ApEn   : approximate entropy per (window, channel), cached per patient (cache/apen/<p>.npy).
-  3. Tune   : optional Optuna TPE + successive-halving search over lr/wd/batch_size (--tune flag).
+  3. Tune   : optional Optuna TPE + successive-halving search over lr/wd/batch_size (--tune flag),
+              run inside every outer fold on its training patients only (nested CV).
   4. Train  : patient-stratified k-fold CV.  Data lives on GPU when it fits, else streamed from
               pinned RAM.  Class-weighted loss, AdamW, grad clipping, best-epoch checkpoint.
   5. Output : results/<exp_name>/  -> summary.json, history.json, summary.png, fold*.pt
@@ -676,10 +677,11 @@ def _run_one_fold(ModelCls, cfg, store, f_all, y_dev, tr, va, groups,
 # =============================================================================
 # 5. Quick hyperparameter search
 # =============================================================================
-def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_dir):
+def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_path, train_idx):
     """
     Optuna TPE search with successive-halving pruning over lr / weight_decay / batch_size.
-    Updates cfg_dict in-place with the winning params, saves tune_results.json.
+    Inner CV uses only train_idx (the outer fold's training windows) -> nested CV, no leakage.
+    Updates cfg_dict in-place with the winning params, saves results to out_path.
     """
     search   = tune_cfg["search"]
     n_trials = tune_cfg["n_trials"]
@@ -693,8 +695,11 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
     f_dev  = None if feats is None else torch.as_tensor(feats, dtype=torch.float32, device=device)
     n_feat = 0 if feats is None else feats.shape[1]
 
-    all_splits  = make_splits(y, groups, max(cfg_dict["folds"], n_folds + 1), cfg_dict["seed"])
-    tune_splits = all_splits[:n_folds]
+    # split the outer-train patients, then map inner indices back to global ones
+    inner = make_splits(y[train_idx], groups[train_idx],
+                        max(cfg_dict["folds"], n_folds + 1), cfg_dict["seed"])
+    tune_splits = [(train_idx[a], train_idx[b]) for a, b in inner[:n_folds]]
+    assert all(np.isin(np.concatenate(s), train_idx).all() for s in tune_splits)
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -741,8 +746,8 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
     for param, val in best["params"].items():
         cfg_dict[param] = val
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "tune_results.json").write_text(json.dumps(
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(
         {"best": best, "all_trials": results}, indent=2))
     return best
 
@@ -750,7 +755,7 @@ def run_tune(cfg_dict, tune_cfg, ModelCls, store, feats, y, groups, device, out_
 # =============================================================================
 # 6. Full cross-validated training
 # =============================================================================
-def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_name):
+def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_name, tune_cfg=None):
     out_dir     = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -770,10 +775,15 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
 
     for fold, (tr, va) in enumerate(splits):
         t_fold = time.time()
+        fold_cfg = dict(cfg_dict)
+        if tune_cfg is not None:
+            log(f"[{run_name}] fold {fold + 1}/{n_folds} | tuning on outer-train patients")
+            run_tune(fold_cfg, tune_cfg, ModelCls, store, feats, y, groups, device,
+                     out_dir / f"tune_fold{fold + 1}.json", tr)
         tr_d = torch.as_tensor(tr, device=device)
 
         counts  = torch.bincount(y_dev[tr_d], minlength=K).float()
-        class_w = (counts.sum() / (K * counts.clamp(min=1))) ** cfg_dict["power"]
+        class_w = (counts.sum() / (K * counts.clamp(min=1))) ** fold_cfg["power"]
 
         if f_dev is not None:
             mu    = f_dev[tr_d].mean(0, keepdim=True)
@@ -784,11 +794,11 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
 
         va_idx = _make_eval_idx(va, groups, seq_len, store.index_device)
 
-        torch.manual_seed(cfg_dict["seed"] + fold)
+        torch.manual_seed(fold_cfg["seed"] + fold)
         model = ModelCls(extra_features=n_feat, n_classes=K,
-                         n_channels=cfg_dict["n_channels"]).to(device)
+                         n_channels=fold_cfg["n_channels"]).to(device)
         opt   = torch.optim.AdamW(model.parameters(),
-                                  lr=cfg_dict["lr"], weight_decay=cfg_dict["weight_decay"])
+                                  lr=fold_cfg["lr"], weight_decay=fold_cfg["weight_decay"])
 
         n_seq_tr = (len(make_sequences(groups, seq_len, tr))
                     if seq_len > 1 else len(tr))
@@ -799,13 +809,13 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
 
         hist = {k: [] for k in ("train_loss", "val_loss", "val_acc", "val_bacc", "val_auprc")}
         best = {"auprc": -1.0, "epoch": -1}
-        bs   = cfg_dict["batch_size"]
+        bs   = fold_cfg["batch_size"]
 
-        for epoch in range(cfg_dict["epochs"]):
+        for epoch in range(fold_cfg["epochs"]):
             t_ep = time.time()
             model.train()
             batches   = _make_batch_idx(tr, groups, seq_len, bs,
-                                        cfg_dict["seed"] + fold * 1000 + epoch,
+                                        fold_cfg["seed"] + fold * 1000 + epoch,
                                         store.index_device)
             run       = torch.zeros((), device=device)
             n_skipped = 0
@@ -817,7 +827,7 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
                     n_skipped += 1
                     continue
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg_dict["clip"])
+                torch.nn.utils.clip_grad_norm_(model.parameters(), fold_cfg["clip"])
                 opt.step()
                 run += loss.detach()
             hist["train_loss"].append((run / max(len(batches) - n_skipped, 1)).item())
@@ -826,7 +836,7 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
 
             vloss, preds, labels, probs = evaluate(
                 model, store, f_all, y_dev, va_idx, class_w, pos,
-                cfg_dict["eval_batch_size"], seq_len, device)
+                fold_cfg["eval_batch_size"], seq_len, device)
             m = fold_metrics(labels, preds, probs, pos)
             hist["val_loss"].append(vloss)
             hist["val_acc"].append(m["acc"])
@@ -843,8 +853,8 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
                 f"| bal acc {m['bacc']:.3f} | AUPRC {m['auprc']:.3f} "
                 f"| {time.time() - t_ep:.1f}s")
 
-            if cfg_dict["patience"] and epoch - best["epoch"] >= cfg_dict["patience"]:
-                log(f"    early stop (no AUPRC gain for {cfg_dict['patience']} epochs)")
+            if fold_cfg["patience"] and epoch - best["epoch"] >= fold_cfg["patience"]:
+                log(f"    early stop (no AUPRC gain for {fold_cfg['patience']} epochs)")
                 break
 
         torch.save(best["state"], out_dir / f"fold{fold + 1}.pt")
@@ -854,7 +864,8 @@ def train_cv(cfg_dict, ModelCls, store, feats, y, groups, device, out_dir, run_n
         sens = float((np.asarray(best["preds"])[is_pos] == pos).mean()) if is_pos.any() else float("nan")
         best_rows.append({"fold": fold + 1, "epoch": e,
                           "bacc": hist["val_bacc"][e], "auprc": hist["val_auprc"][e],
-                          "sensitivity": sens})
+                          "sensitivity": sens,
+                          "hparams": {k: fold_cfg[k] for k in ("lr", "weight_decay", "batch_size")}})
         last_rows.append({"fold": fold + 1,
                           "bacc": hist["val_bacc"][-1], "auprc": hist["val_auprc"][-1]})
         histories.append(hist)
@@ -1173,12 +1184,8 @@ def run_experiment(args):
     if device.type == "cuda":
         log(f"VRAM in use: {torch.cuda.memory_allocated() / 2**30:.1f} GB")
 
-    if args.tune:
-        run_tune(cfg, tune_cfg, ModelCls, store, apen, y, groups, device, out_dir)
-        log(f"[tune] proceeding to full CV with: "
-            f"lr={cfg['lr']}  wd={cfg['weight_decay']}  bs={cfg['batch_size']}")
-
-    result = train_cv(cfg, ModelCls, store, apen, y, groups, device, out_dir, args.exp)
+    result = train_cv(cfg, ModelCls, store, apen, y, groups, device, out_dir, args.exp,
+                      tune_cfg if args.tune else None)
 
     b, p2 = result["best_epoch"], result["pooled_best"]
     log("=" * 78)

@@ -54,7 +54,7 @@ nExp = df["Name"].nunique()
 meanOrder = folds.groupby("Name")["auprc"].mean().sort_values(ascending=False).index
 
 # Three plots stacked vertically; same experiment order, so only the bottom one shows the names
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(max(8, nExp * 1.2), 13.5), sharex=True,
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(max(8, nExp * 1.7), 10), sharex=True,
                                     layout="constrained")
 
 # Mean over folds of each fold's best epoch, error bar = std over folds
@@ -86,4 +86,5 @@ ax1.set_ylim(0, 1.01)
 # Anchor rotated names at their right end so long neighbours don't overlap
 plt.setp(ax3.get_xticklabels(), rotation=30, ha="right", rotation_mode="anchor")
 
+plt.savefig("results/experiments_comparison.png")
 plt.show()

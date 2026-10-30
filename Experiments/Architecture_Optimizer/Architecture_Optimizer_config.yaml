@@ -1,0 +1,40 @@
+n_trials: 100
+n_folds: 10
+seed: 123
+batch_size: 128
+eval_batch_size: 128
+weight_decay: 0.0
+epochs: 30
+
+model: "ficrnn_gru"
+patients: ["chb01", "chb02", "chb03"]
+
+lr:
+  MIN: 0.01
+  MAX: 0.05
+
+classifier_hiden:
+  MIN: 4
+  MAX: 16
+
+film_layers:
+  MIN: 2
+  MAX: 15
+
+film_generator_layers:
+  MIN: 2
+  MAX: 8
+
+dropouts: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+
+kernel_sizes:
+  MIN: 3
+  MAX: 12
+
+n_film:
+  MIN: 3
+  MAX: 8
+
+n_chanels:
+  MIN: 1
+  MAX: 24

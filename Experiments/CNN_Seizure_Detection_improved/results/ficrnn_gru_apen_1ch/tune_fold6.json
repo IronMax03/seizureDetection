@@ -1,12 +1,12 @@
 {
   "best": {
-    "trial": 12,
+    "trial": 4,
     "params": {
-      "lr": 0.003080852974150455,
-      "weight_decay": 1.5060053038361175e-05,
-      "batch_size": 256
+      "lr": 0.0016367645761140052,
+      "weight_decay": 5.369908947196366e-06,
+      "batch_size": 512
     },
-    "auprc": 0.3872351367785307
+    "auprc": 0.3560049011641717
   },
   "all_trials": [
     {
@@ -17,7 +17,7 @@
         "batch_size": 512
       },
       "state": "COMPLETE",
-      "auprc": 0.31255933001023517
+      "auprc": 0.3037587579199455
     },
     {
       "trial": 2,
@@ -27,7 +27,7 @@
         "batch_size": 128
       },
       "state": "COMPLETE",
-      "auprc": 0.24152664188143202
+      "auprc": 0.27468248791589245
     },
     {
       "trial": 3,
@@ -37,7 +37,7 @@
         "batch_size": 128
       },
       "state": "PRUNED",
-      "auprc": 0.03202160025149506
+      "auprc": 0.03304766160340399
     },
     {
       "trial": 4,
@@ -47,7 +47,7 @@
         "batch_size": 512
       },
       "state": "COMPLETE",
-      "auprc": 0.34113776187570993
+      "auprc": 0.3560049011641717
     },
     {
       "trial": 5,
@@ -57,7 +57,7 @@
         "batch_size": 128
       },
       "state": "PRUNED",
-      "auprc": 0.42002424346235717
+      "auprc": 0.41926448768787916
     },
     {
       "trial": 6,
@@ -67,7 +67,7 @@
         "batch_size": 512
       },
       "state": "PRUNED",
-      "auprc": 0.006923262004258618
+      "auprc": 0.006923008544272863
     },
     {
       "trial": 7,
@@ -77,7 +77,7 @@
         "batch_size": 256
       },
       "state": "PRUNED",
-      "auprc": 0.0020155560399098254
+      "auprc": 0.002015985441018519
     },
     {
       "trial": 8,
@@ -87,7 +87,7 @@
         "batch_size": 256
       },
       "state": "PRUNED",
-      "auprc": 0.012213990064561454
+      "auprc": 0.012151986867725548
     },
     {
       "trial": 9,
@@ -97,7 +97,7 @@
         "batch_size": 512
       },
       "state": "PRUNED",
-      "auprc": 0.24369014030264588
+      "auprc": 0.24851430314539802
     },
     {
       "trial": 10,
@@ -107,7 +107,7 @@
         "batch_size": 128
       },
       "state": "PRUNED",
-      "auprc": 0.007172529029597922
+      "auprc": 0.007217719677204688
     },
     {
       "trial": 11,
@@ -116,48 +116,48 @@
         "weight_decay": 0.0005498237766476769,
         "batch_size": 512
       },
-      "state": "PRUNED",
-      "auprc": 0.029041676106379904
+      "state": "COMPLETE",
+      "auprc": 0.3437288494057496
     },
     {
       "trial": 12,
       "params": {
-        "lr": 0.003080852974150455,
-        "weight_decay": 1.5060053038361175e-05,
-        "batch_size": 256
+        "lr": 0.006022451757230421,
+        "weight_decay": 0.002230340783305505,
+        "batch_size": 512
       },
-      "state": "COMPLETE",
-      "auprc": 0.3872351367785307
+      "state": "PRUNED",
+      "auprc": 0.5335674874941098
     },
     {
       "trial": 13,
       "params": {
-        "lr": 0.008626851624494357,
-        "weight_decay": 6.861911966298848e-06,
+        "lr": 0.008855201673296119,
+        "weight_decay": 3.1652761448318645e-05,
         "batch_size": 256
       },
-      "state": "COMPLETE",
-      "auprc": 0.3287946600027052
+      "state": "PRUNED",
+      "auprc": 0.505938064478642
     },
     {
       "trial": 14,
       "params": {
-        "lr": 0.001115101157648096,
-        "weight_decay": 5.5281615852368256e-05,
-        "batch_size": 256
+        "lr": 0.002598830363686609,
+        "weight_decay": 0.00035265039387704907,
+        "batch_size": 512
       },
       "state": "PRUNED",
-      "auprc": 0.3633560837768289
+      "auprc": 0.503944727026701
     },
     {
       "trial": 15,
       "params": {
-        "lr": 0.0004638135236241373,
-        "weight_decay": 1.1463442272381939e-06,
-        "batch_size": 128
+        "lr": 0.007675191490158006,
+        "weight_decay": 0.00045414331775976507,
+        "batch_size": 256
       },
       "state": "PRUNED",
-      "auprc": 0.37195792449669446
+      "auprc": 0.4919263067322455
     }
   ]
 }

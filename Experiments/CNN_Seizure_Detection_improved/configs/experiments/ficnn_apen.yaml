@@ -3,7 +3,7 @@ model: ficnn
 preprocess: raw
 features: apen
 
-data_fraction: 0.5
+data_fraction: 0.75
 
 tune:
   n_trials: 15
@@ -13,4 +13,4 @@ tune:
     search:
       lr: {low: 1.0e-5, high: 1.0e-2, log: true}            # any value in the range
       weight_decay: {low: 1.0e-6, high: 1.0e-2, log: true}
-      batch_size: [32, 64, 128, 256, 512]   
+      batch_size: [64, 128, 256]   

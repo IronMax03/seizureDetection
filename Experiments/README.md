@@ -14,28 +14,9 @@ results.
 | `CHB-MIT_Formating/` | Downloads and windows the CHB-MIT Scalp EEG Database for seizure/non-seizure analysis. | [README](CHB-MIT_Formating/README.md) |
 | `CNN_Seizure_Detection/` | Reproduces Acharya et al.'s 13-layer 1-D CNN on three Bonn EEG classes. | [README](CNN_Seizure_Detection/README.md) |
 | `Entropy_Based_Fetures/` | Evaluates Kolmogorov-Sinai, spectral, approximate, and Renyi entropy features with XGBoost on Bonn EEG. | [README](Entropy_Based_Fetures/README.md) |
-| `CNN_Seizure_Detection_improved/` | In-progress CNN extension using entropy features for FiLM conditioning and denoising preprocessing. | [README](CNN_Seizure_Detection_improved/README.md) |
+| `CNN_Seizure_Detection_improved/` | In-progress FiLM-conditioned CNN, CNN–RNN and CNN–GRU models on CHB-MIT, conditioned on ApEn. | [README](CNN_Seizure_Detection_improved/README.md), [Results](CNN_Seizure_Detection_improved/Results.md) |
+| `Architecture_Optimizer/` | In-progress Optuna search over the FiCRNN-GRU architecture (FiLM depth, kernel sizes, channels, generator depth, GRU width, dropouts, learning rate) with k-fold CV on CHB-MIT patients. | README pending |
 | `ECG_denoising/` | Separate exploratory work on signal denoising of a simulated ECG signal.  | README pending |
-
-## How the experiments fit together
-
-```text
-Bonn EEG
-   ├── baseline 13-layer CNN
-   └── entropy feature evaluation
-EEGdenoiseNet
-   └── artifact-removal method comparison
-Entropy features + artifact removal
-   └── improved CNN with FiLM conditioning
-CHB-MIT EEG
-   └── preprocessing and integration in progress
-```
-
-The improved architecture is an active work in progress. Its current design
-uses entropy features to generate FiLM parameters that modulate intermediate
-CNN feature maps, while denoising is treated as an upstream preprocessing
-step. The Bonn dataset is too small and clean for its k-fold statistics to be
-treated as a strong generalization result.
 
 ## Data and execution notes
 
@@ -46,15 +27,6 @@ treated as a strong generalization result.
   lengths.
 - For classification comparisons, document the dataset split and ensure that
   windows from the same recording or patient do not leak across splits.
-- Generated figures belong in the experiment's `graphs/` directory or in
+- Generated figures belong in the experiment's `graphs/` directory (training
+  runs of `CNN_Seizure_Detection_improved/` write theirs to `results/`), or in
   `doc/visuals/` when they are used by repository-level documentation.
-
-## Documentation convention
-
-When adding an experiment, include a README that states:
-
-- the research question and referenced method;
-- the dataset and download or placement instructions;
-- the role of each script or notebook;
-- the preprocessing, labels, and evaluation protocol;
-- current results, limitations, and open questions.

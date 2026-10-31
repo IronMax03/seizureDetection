@@ -64,12 +64,12 @@ Results land in `results/<exp_name>/` — one subfolder per experiment run.
 | `--class-names NAME [NAME …]` | `class_names` |
 | `--sequence-len INT` | `sequence_len` |
 
-Precedence: CLI flag > experiment yaml > base yaml. With `--tune`, the winning `search` values then replace these values before full CV.
+Precedence: CLI flag > experiment yaml > base yaml. With `--tune`, each outer fold's winning `search` values replace these values for that fold.
 
 
 # Hyperparameter tuning (`--tune`)
 
-`--tune` tries several hyperparameter combinations from `tune.search` using **successive halving**: every combination starts training, and the weaker ones are stopped early so the training time goes to the most promising ones. The best combination is then used for the full CV run.
+`--tune` tries several hyperparameter combinations from `tune.search` using **successive halving**: every combination starts training, and the weaker ones are stopped early so the training time goes to the most promising ones. The search runs inside every outer CV fold, on that fold's training patients only (nested CV), and the fold is then trained with its own best combination.
 
 **`tune:` keys** (in the experiment yaml):
 
@@ -78,11 +78,12 @@ Precedence: CLI flag > experiment yaml > base yaml. With `--tune`, the winning `
 | `n_trials` | 8 | Total trials, pruned ones included. 20–30 recommended |
 | `n_folds` | 1 | Patient folds per trial |
 | `n_epochs` | 10 | Maximum epochs per fold per trial |
-| `search` | `lr`, `weight_decay`, `batch_size` | Any base-config key mapped to a list of choices, except `sequence_len`, `folds`, `seed` |
+| `search` | `lr`, `weight_decay`, `batch_size` | Any base-config key mapped to a list of choices or to a range `{low, high, log}`, except `sequence_len`, `folds`, `seed` |
 
 Gotchas:
 
 - A `search` block in the yaml **replaces** the default search space, it is not merged. List every key you want searched.
+- `search` must sit directly under `tune:`. A nested `tune: tune: search:` is silently ignored and the default search space is used.
 - The first trial is never pruned.
 - Nothing prints during a trial, only one line per finished or pruned trial:
   ```
@@ -116,16 +117,18 @@ Find the `MODEL_REGISTRY` dict near the top and add one line:
 
 ```python
 MODEL_REGISTRY = {
-    "ficnn":   FiCNN,
-    "ficrnn":  FiCRNN,
-    "mymodel": MyModel,   # ← add this
+    "ficnn":      FiCNN,
+    "ficnn_reg":  FiCNN_reg,
+    "ficrnn":     FiCRNN,
+    "ficrnn_gru": FiCRNN_GRU,
+    "mymodel":    MyModel,   # ← add this
 }
 ```
 
 Also add the import at the top:
 
 ```python
-from Architectures import FiCNN, FiCRNN, MyModel
+from Architectures import FiCNN, FiCNN_reg, FiCRNN, FiCRNN_GRU, MyModel
 ```
 
 ## 3. Create an experiment yaml
@@ -219,4 +222,4 @@ After a run, `results/<exp_name>/` contains:
 | `history.json` | Per-fold, per-epoch loss and metrics |
 | `summary.png` | Loss curves, validation metrics, confusion matrix |
 | `fold1.pt … foldN.pt` | Best-epoch model weights per fold |
-| `tune_results.json` | (only with `--tune`) All trials (params, state `COMPLETE`/`PRUNED`, best score reached) + winning params |
+| `tune_fold<k>.json` | (only with `--tune`, one per outer fold, nested CV) All trials (params, state `COMPLETE`/`PRUNED`, best score reached) + winning params |

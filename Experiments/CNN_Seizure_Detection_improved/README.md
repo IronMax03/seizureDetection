@@ -12,13 +12,13 @@ This is a work-in-progress experiment to create a new architecture for seizure d
 ```
 train_gpu.py            ← training script
 Architectures.py        ← model definitions
+comparing_results.py    ← builds results/experiments_comparison.png
+Experiments.md          ← CLI, config system and how to add an experiment
+Results.md              ← description and results of every experiment
 configs/
   default_training_config.yaml   ← base hyperparameters
-  experiments/
-    ficnn_apen.yaml              ← FiCNN + raw EEG + ApEn conditioning
-    ficnn_control.yaml           ← FiCNN + raw EEG + no conditioning
-    ficrnn_apen.yaml             ← FiCRNN (FiCNN + RNN classifier) + raw EEG + ApEn
-    ficrnn_atar_apen.yaml        ← FiCRNN + ATAR-denoised + ApEn (template with tune block)
+  experiments/                   ← one yaml per experiment (see Results.md)
+results/<experiment>/   ← summary.json, history.json, summary.png, fold weights
 utils.py                ← ApEn implementation
 denois.py               ← ATAR denoising
 ```
@@ -29,39 +29,48 @@ denois.py               ← ATAR denoising
 
 Before training, run [../CHB-MIT_Formating/Reformating.ipynb](../CHB-MIT_Formating/Reformating.ipynb) to export the CHB-MIT dataset into per-patient `X.npy` / `y.npy` files. The default expected path is `../CHB-MIT_Formating/npy_data/`.
 
+By default every patient folder is used, but the patients have different
+channel counts. The reported results use the 10 patients with 23 channels:
+
+```bash
+python train_gpu.py --exp ficrnn_gru_apen --tune \
+  --patients chb01 chb02 chb03 chb05 chb06 chb07 chb08 chb10 chb23 chb24
+```
+
 
 ## Setting up a new experiment
 To understand how the experimentation framework used in this folder works, take a look at [Experiments.md](Experiments.md).
 
 ## Results
 
-| Metric | FiCRNN + ApEn (CHB-MIT, patient-wise 10-fold) | Paper reimplementation (Bonn) | Paper (Bonn) |
-|---|---|---|---|
-| Balanced accuracy | 79.47% ± 10.93 | — | — |
-| AUPRC | 0.586 ± 0.236 | — | — |
-| Sensitivity | 62.92% | 95.50% | 95.00% |
-| Specificity | 97.81% | 91.00% | 90.00% |
-| Precision | 8.18% | — | — |
+The current best is **FiCRNN_GRU_APEN** (`configs/experiments/ficrnn_gru_apen.yaml`):
+raw EEG, ApEn conditioning, 1 s windows at 256 Hz, sequences of 32 windows,
+75% of the data, and patient-wise 10-fold cross-validation. Seizure windows
+are only ~0.3% of the data used, so balanced accuracy and AUPRC are the
+primary metrics.
 
-These FiCRNN results use `configs/experiments/ficrnn_apen.yaml`: raw EEG,
-ApEn conditioning, 1 s windows at 256 Hz, sequences of 32 windows, 50% of the
-data, and patient-wise 10-fold cross-validation. CHB-MIT has ~0.1–0.7%
-seizure windows vs. 50% in Bonn, so balanced accuracy and AUPRC are the primary
-metrics.
+| Metric | FiCRNN_GRU_APEN (CHB-MIT, patient-wise 10-fold) |
+|---|---|
+| Balanced accuracy | 82.1% ± 12.1% |
+| AUPRC | 0.638 ± 0.233 |
+| Sensitivity | 68.9% ± 24.0% |
+| Specificity (pooled) | 95.0% |
+
+Scores are taken at each fold's best epoch, chosen on that fold's held-out
+patients, so they are optimistic. Every experiment, last-epoch scores, per-fold
+results and training curves are in [Results.md](Results.md).
 
 <div align="center">
-  <p><b>FiCRNN training and validation results</b></p>
-  <img width="100%" alt="fig1" src="graphs/FiCRNN_1.png" />
-  <p><b>FiCRNN detailed architecture</b></p>
-  <img width="100%" alt="fig2" src="../../doc/figs/FiCRNN/ficrnn_detailed.png" />
-  <p><b>FiCRNN unrolled over time</b></p>
-  <img width="100%" alt="fig3" src="../../doc/figs/FiCRNN/ficrnn_unrolled.png" />
+  <p><b>FiCRNN_GRU_APEN detailed architecture</b></p>
+  <img width="100%" alt="FiCRNN_GRU_APEN detailed architecture" src="../../doc/figs/FiCRNN_GRU/ficrnn_gru_detailed.png" />
+  <p><b>FiCRNN_GRU_APEN unrolled over time</b></p>
+  <img width="100%" alt="FiCRNN_GRU_APEN unrolled over time" src="../../doc/figs/FiCRNN_GRU/ficrnn_gru_unrolled.png" />
 </div>
 
 ### Architecture
 
-FiCRNN classifies EEG one 1-second window at a time, using the previous
-windows as context. It has two parts:
+FiCRNN_GRU classifies EEG one 1-second window at a time, using the previous
+windows of the same 32-window sequence as context. It has two parts:
 
 1. **FiLM-CNN encoder.** A 1D CNN of five convolutional blocks turns each
    23-channel window (256 samples) into a 40-dimensional feature vector.
@@ -70,16 +79,19 @@ windows as context. It has two parts:
    modulate the normalized convolution outputs, so the entropy features steer
    which patterns the CNN emphasises. The same encoder, with the same
    weights, is applied to every window.
-2. **Recurrent classifier.** A unidirectional RNN (16 hidden units) reads the
+2. **Recurrent classifier.** A unidirectional GRU (16 hidden units) reads the
    sequence of window features and carries a hidden state from one window to
    the next. A dropout and linear layer then outputs seizure / non-seizure
-   logits for every window. Because the RNN only looks backward, each
-   prediction uses only the current and past windows, which keeps the model
-   usable in real time.
+   logits for every window. The GRU only looks backward, so each prediction
+   uses only the current and past windows. The hidden state is reset to zero
+   at the start of every 32-window sequence.
 
 Regularisation includes channel dropout in the conv blocks, dropout in the
 FiLM generator and before the output layer, and a zero-initialised FiLM
 generator, so training starts from an unmodulated CNN.
+
+FiCRNN (`model: ficrnn`) is the same model with a vanilla RNN instead of the
+GRU.
 
 ---
 ### Observation

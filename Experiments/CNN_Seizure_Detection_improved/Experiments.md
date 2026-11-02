@@ -1,8 +1,6 @@
 # Quick start
 
 ```bash
-pip install optuna  # only needed for --tune
-
 # list available experiments
 python train_gpu.py --list-experiments
 
@@ -14,6 +12,9 @@ python train_gpu.py --exp ficnn_apen ficrnn_apen ficrnn_gru_apen_1ch
 
 # Optuna successive-halving search first, then full CV
 python train_gpu.py --exp ficnn_apen --tune
+
+# repeat the full CV once per seed listed in the yaml `seeds` key
+python train_gpu.py --exp ficnn_apen --multi-seed
 
 # override any hyperparam on the fly
 python train_gpu.py --exp ficnn_apen --lr 1e-3 --epochs 50 --folds 5
@@ -34,6 +35,7 @@ Results land in `results/<exp_name>/` — one subfolder per experiment run.
 | `--exp NAME [NAME …]` | One or more experiment names (stems of yamls in `configs/experiments/`), run one after the other |
 | `--list-experiments` | Print the available experiments and exit |
 | `--tune` | Run an Optuna successive-halving search before full CV (see [Hyperparameter tuning](#hyperparameter-tuning---tune)) |
+| `--multi-seed` | Repeat the full CV once per seed in the yaml `seeds` list (see [Multi-seed training](#multi-seed-training---multi-seed)) |
 
 **Data / paths**
 
@@ -92,6 +94,24 @@ Gotchas:
     trial  2/20 | lr=3e-03  wd=0e+00  bs=512 | pruned
   ```
 - Pruner settings are Optuna defaults and cannot be set from the config.
+
+
+# Multi-seed training (`--multi-seed`)
+
+`--multi-seed` runs the full CV once per seed in the `seeds` list, to measure how much the results depend on the random seed. The data is loaded and cached once, then reused by every seed.
+
+```yaml
+seeds: [123, 456, 789]   # default in default_training_config.yaml; override per experiment
+```
+
+Each seed changes:
+
+- the patient fold splits,
+- the model initialisation,
+- the batch order,
+- the Optuna search, when combined with `--tune`.
+
+Each seed does not change the `data_fraction` subsample. It always uses the base `seed`, so every seed trains on the same windows.
 
 
 # Setting up a new experiment
@@ -200,6 +220,7 @@ configs/default_training_config.yaml      ← base hyperparams (lr, wd, epochs, 
 | `patience` | 0 | Early stopping patience in epochs (0 = disabled) |
 | `data_on` | auto | Where EEG windows live: `auto` / `gpu` / `ram` |
 | `seed` | 123 | Random seed |
+| `seeds` | `[123, 456, 789]` | Seeds for `--multi-seed`, one full CV each. Ignored without the flag |
 | `workers` | cpu_count−1 | Parallel workers for cache building |
 | `single_chanel_only` | `false` | `true` = train on the first EEG channel of each patient only (patients may then have different channel counts); `false` = all channels |
 | `sequence_len` | 1 | Windows per RNN sequence; >1 for FiCRNN, 1 = window-independent (FiCNN) |
@@ -223,3 +244,9 @@ After a run, `results/<exp_name>/` contains:
 | `summary.png` | Loss curves, validation metrics, confusion matrix |
 | `fold1.pt … foldN.pt` | Best-epoch model weights per fold |
 | `tune_fold<k>.json` | (only with `--tune`, one per outer fold, nested CV) All trials (params, state `COMPLETE`/`PRUNED`, best score reached) + winning params |
+
+With `--multi-seed`, the files above go to `results/<exp_name>/seed<s>/`, one subfolder per seed. `results/<exp_name>/` then also contains:
+
+| File | Content |
+|---|---|
+| `multi_seed_summary.json` | Seed list, per-seed CV means and mean ± std across seeds of bal acc, AUPRC (best epoch), sensitivity, specificity, FP/h (pooled) |

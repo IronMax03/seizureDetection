@@ -23,6 +23,7 @@ Usage
   python train_gpu.py --exp ficnn_apen ficrnn_apen    # several experiments, one after the other
   python train_gpu.py --exp ficrnn_apen              # sequence model, sequence_len set in yaml
   python train_gpu.py --exp ficnn_apen --lr 1e-3 --epochs 50
+  python train_gpu.py --exp ficnn_apen --multi-seed  # one full CV per seed in the yaml `seeds` list
   python train_gpu.py --list-experiments
 
 Adding a new model
@@ -1014,6 +1015,9 @@ def parse_args():
     p.add_argument("--list-experiments", action="store_true")
     p.add_argument("--tune", action="store_true",
                    help="run an Optuna successive-halving search before full CV")
+    p.add_argument("--multi-seed", action="store_true", dest="multi_seed",
+                   help="repeat the full CV once per seed in the yaml `seeds` list, "
+                        "results in <out_dir>/<exp>/seed<s>/ + multi_seed_summary.json")
 
     p.add_argument("--data-dir",  default=None)
     p.add_argument("--cache-dir", default=None)
@@ -1083,6 +1087,8 @@ def run_experiment(args):
         "sequence_len": args.sequence_len,
     }
     cfg, tune_cfg = load_cfg(args.exp, cli_overrides)
+    if args.multi_seed and not cfg.get("seeds"):
+        raise SystemExit(f"--multi-seed needs a non-empty `seeds` list in the yaml of '{args.exp}'.")
 
     ModelCls = MODEL_REGISTRY.get(cfg["model"])
     if ModelCls is None:
@@ -1184,15 +1190,47 @@ def run_experiment(args):
     if device.type == "cuda":
         log(f"VRAM in use: {torch.cuda.memory_allocated() / 2**30:.1f} GB")
 
-    result = train_cv(cfg, ModelCls, store, apen, y, groups, device, out_dir, args.exp,
-                      tune_cfg if args.tune else None)
+    if not args.multi_seed:
+        result = train_cv(cfg, ModelCls, store, apen, y, groups, device, out_dir, args.exp,
+                          tune_cfg if args.tune else None)
 
-    b, p2 = result["best_epoch"], result["pooled_best"]
+        b, p2 = result["best_epoch"], result["pooled_best"]
+        log("=" * 78)
+        log(f"{args.exp} | bal acc {b['bacc'][0]:.3f} +/- {b['bacc'][1]:.3f} "
+            f"| AUPRC {b['auprc'][0]:.3f} +/- {b['auprc'][1]:.3f} "
+            f"| sens {p2['sensitivity']:.3f} | spec {p2['specificity']:.4f} "
+            f"| FP/h {p2['fp_per_hour']:.1f}")
+        return
+
+    # data loading + data_fraction subsample stay on cfg["seed"]; each run re-seeds
+    # fold splits, model init, batch order and tuning
+    seeds, results = [int(s) for s in cfg["seeds"]], []
+    for i, s in enumerate(seeds, 1):
+        log(f"===== seed {s} ({i}/{len(seeds)}) =====")
+        results.append(train_cv({**cfg, "seed": s}, ModelCls, store, apen, y, groups, device,
+                                out_dir / f"seed{s}", f"{args.exp}_seed{s}",
+                                tune_cfg if args.tune else None))
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    per_seed = {
+        "bacc":        [r["best_epoch"]["bacc"][0] for r in results],
+        "auprc":       [r["best_epoch"]["auprc"][0] for r in results],
+        "sensitivity": [r["pooled_best"]["sensitivity"] for r in results],
+        "specificity": [r["pooled_best"]["specificity"] for r in results],
+        "fp_per_hour": [r["pooled_best"]["fp_per_hour"] for r in results],
+    }
+    agg = {k: (float(np.nanmean(v)), float(np.nanstd(v))) for k, v in per_seed.items()}
+    (out_dir / "multi_seed_summary.json").write_text(json.dumps(
+        {"experiment": args.exp, "seeds": seeds, "mean_std": agg, "per_seed": per_seed}, indent=2))
+
     log("=" * 78)
-    log(f"{args.exp} | bal acc {b['bacc'][0]:.3f} +/- {b['bacc'][1]:.3f} "
-        f"| AUPRC {b['auprc'][0]:.3f} +/- {b['auprc'][1]:.3f} "
-        f"| sens {p2['sensitivity']:.3f} | spec {p2['specificity']:.4f} "
-        f"| FP/h {p2['fp_per_hour']:.1f}")
+    log(f"{args.exp} | {len(seeds)} seeds (mean +/- std of per-seed CV means) "
+        f"| bal acc {agg['bacc'][0]:.3f} +/- {agg['bacc'][1]:.3f} "
+        f"| AUPRC {agg['auprc'][0]:.3f} +/- {agg['auprc'][1]:.3f} "
+        f"| sens {agg['sensitivity'][0]:.3f} +/- {agg['sensitivity'][1]:.3f} "
+        f"| spec {agg['specificity'][0]:.4f} +/- {agg['specificity'][1]:.4f} "
+        f"| FP/h {agg['fp_per_hour'][0]:.1f} +/- {agg['fp_per_hour'][1]:.1f}")
 
 
 if __name__ == "__main__":

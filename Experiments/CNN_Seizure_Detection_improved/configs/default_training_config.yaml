@@ -9,6 +9,7 @@
 # single_chanel_only : true = train on the first EEG channel only; false = all channels
 folds: 10
 seed: 123
+seeds: [123, 456, 789]   # used only with --multi-seed: one full CV per seed
 epochs: 30
 batch_size: 256
 eval_batch_size: 4096

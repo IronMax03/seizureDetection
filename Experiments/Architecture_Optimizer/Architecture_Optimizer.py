@@ -1,4 +1,6 @@
+import json
 import sys
+import time
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "CNN_Seizure_Detection_improved"))  # train_gpu lives there
@@ -84,6 +86,7 @@ def optimize(config, x, y):
     K = int(y_dev.max()) + 1
 
     def Objective(trial):
+        trial_start = time.perf_counter()
         lr = trial.suggest_float("learning_rate", config["lr"]["MIN"], config["lr"]["MAX"])
         arch = sample_architecture(trial, config)
         models = [FiCRNN_GRU_OPT(n_classes=K, n_channels=config["n_channels"], **arch).to(device) for _ in splits]
@@ -91,13 +94,37 @@ def optimize(config, x, y):
         best = -np.inf
         for epoch in range(config["epochs"]):
             best = max(best, kfold_epoch(trial, epoch, models, opts, splits, store, y_dev))
+            log(f"  trial {trial.number} epoch {epoch}: AUPRC {best:.4f}")
+
+        film = ", ".join(f"{kernel}x{channel}" for kernel, channel in zip(arch["kernels"], arch["channels"]))
+        elapsed = time.perf_counter() - trial_start
+        log(f"trial {trial.number}: AUPRC {best:.4f} | time {elapsed:.2f}s | "
+            f"arch FiLM[{film}] -> GRU[{arch['classifier_hiden']}] -> "
+            f"FiLM generator[{arch['film_generator_layers']}]")
         return best
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=config["seed"]),
-                                pruner=optuna.pruners.SuccessiveHalvingPruner())
+                                pruner=optuna.pruners.HyperbandPruner(min_resource=3, max_resource=config["epochs"]))
     study.optimize(Objective, n_trials=config["n_trials"],
                    catch=(AssertionError,))  # too-deep archs fail the model's window-length assert; skip them
-    log(f"best: {study.best_params} AUPRC {study.best_value:.4f}")
+    all_trials = [
+        {
+            "trial": trial.number,
+            "state": trial.state.name,
+            "value": trial.value,
+            "params": trial.params,
+        }
+        for trial in study.trials
+    ]
+    log(json.dumps({
+        "best": {
+            "trial": study.best_trial.number,
+            "value": study.best_value,
+            "params": study.best_params,
+        },
+        "last_trial": study.trials[-1].number,
+        "all_trials": all_trials,
+    }, indent=2))
     return study
 
 
@@ -110,6 +137,8 @@ def load_data(config):
         xk = _to_uv_f16(np.load(data_dir / p / "X.npy", mmap_mode="r"))[0]
         y.append(_window_labels(np.load(data_dir / p / "y.npy"), len(xk), p))
         x.append(xk)
+
+    log (f"loaded {len(x)} patients, {sum(len(p) for p in x)} windows")
     return x, y
 
 
@@ -117,10 +146,12 @@ def main():
     import yaml
     with open(HERE / "Architecture_Optimizer_config.yaml") as f:
         config = yaml.safe_load(f)
+    log(f"Config loaded: {config}")
     x, y = load_data(config)
     config["n_channels"] = int(x[0].shape[1])
     config["window_len"] = int(x[0].shape[2])
     optimize(config, x, y)
+    log("Optimization finished")
 
 
 if __name__ == "__main__":

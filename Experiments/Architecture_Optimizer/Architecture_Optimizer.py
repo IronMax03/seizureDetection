@@ -48,7 +48,7 @@ def sample_architecture(trial, config):
 def optimize(config, x, y):
     """x, y: per-patient lists (x[i] (n_i, C, T), y[i] (n_i,)); patient id = list index.
     Patient-wise k-fold, one model per fold, trained one epoch per kfold_epoch call."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
     def patient_splits(x, y):
         """Per-patient lists -> window store, labels on device, patient-wise (tr, va) folds."""

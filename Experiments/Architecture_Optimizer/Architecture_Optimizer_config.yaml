@@ -1,13 +1,17 @@
 n_trials: 100
-n_folds: 10
+n_folds: 3
 seed: 123
 batch_size: 128
 eval_batch_size: 128
 weight_decay: 0.0
+power: 1.0
+clip: 1.0
 epochs: 30
+steps_per_epoch: 10
 
 model: "ficrnn_gru"
 patients: ["chb01", "chb02", "chb03"]
+test_patients: ["chb04", "chb05", "chb06"]
 
 lr:
   MIN: 0.01

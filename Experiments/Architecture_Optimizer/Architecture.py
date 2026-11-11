@@ -36,7 +36,7 @@ class FiCRNN_GRU_OPT(nn.Module):
         L = 256  # CHB-MIT 1-second windows at 256 Hz; change here if your data differs
         for k in kernels:
             L = (L - k + 1) // 2
-        assert L > 0, f"Window length 256 is too short for this architecture (kernels {self.kernels})"
+        assert L > 0, f"Window length 256 is too short for this architecture (kernels {kernels})"
         flat_size = channels[-1] * L  # = 40 for L=256
 
         # instantiate FiLM generator
@@ -46,15 +46,16 @@ class FiCRNN_GRU_OPT(nn.Module):
             blocks.append(nn.Dropout(dropout_film_generator))
             blocks.append(nn.Linear(gen_in, 32))
             blocks.append(nn.LeakyReLU(0.01))
+            gen_in = 32
 
         self.film_dim  = 2 * sum(channels)
-        blocks.append(nn.Linear(32, self.film_dim))
-        self.film_generator = nn.ModuleList(blocks)
-        nn.init.zeros_(self.film_generator.weight)
-        nn.init.zeros_(self.film_generator.bias)
+        blocks.append(nn.Linear(gen_in, self.film_dim))
+        self.film_generator = nn.Sequential(*blocks)
+        nn.init.zeros_(self.film_generator[-1].weight)
+        nn.init.zeros_(self.film_generator[-1].bias)
 
         # instantiate FiLM Layers
-        channels.insert(0, n_channels)
+        channels = [n_channels] + channels
         blocks = []
         for i, k in enumerate(kernels):
             blocks.append(FiLMBlock(channels[i], channels[i + 1] ,k, dropout_p = dropouts_film_cnn))
@@ -67,14 +68,20 @@ class FiCRNN_GRU_OPT(nn.Module):
         self.classifier = nn.Sequential(
                     rnn,
                     nn.Dropout(dropouts_classifier),
-                    nn.Linear(1, n_classes),
+                    nn.Linear(classifier_hiden, n_classes),
                 )
 
     def forward(self, x_serie, x_features):
+        half = self.film_dim // 2
         if x_features is not None:
             bg = self.film_generator(x_features)
-            beta, gamma = bg[0:self.film_dim//2, -1], 1 + bg[self.film_dim//2:-1, -1]
+            beta, gamma = bg[:, :half], 1 + bg[:, half:]
         else:
-            gamma, beta = [1] * (self.film_dim//2), [0] * (self.film_dim//2)
+            gamma, beta = x_serie.new_ones(len(x_serie), half), x_serie.new_zeros(len(x_serie), half)
 
-        return self.classifier(self.FiLM(x_serie, gamma, beta))
+        h, i = x_serie, 0
+        for block in self.FiLM:
+            h = block(h, gamma[:, i:i + block.out_ch], beta[:, i:i + block.out_ch])
+            i += block.out_ch
+        out, _ = self.classifier[0](h.flatten(1).unsqueeze(1))  # GRU returns (output, hidden); window = length-1 sequence
+        return self.classifier[1:](out[:, -1])

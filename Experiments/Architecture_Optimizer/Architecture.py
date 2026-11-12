@@ -63,7 +63,8 @@ class FiCRNN_GRU_OPT(nn.Module):
         self.FiLM = nn.ModuleList(blocks)
 
         # instantiate Classifier layers
-        rnn = nn.GRU(input_size=flat_size, hidden_size=classifier_hiden, dropout = dropouts_classifier, batch_first=True)
+        # no GRU-internal dropout: it only applies between stacked layers (num_layers=1 here)
+        rnn = nn.GRU(input_size=flat_size, hidden_size=classifier_hiden, batch_first=True)
 
         self.classifier = nn.Sequential(
                     rnn,
@@ -72,6 +73,13 @@ class FiCRNN_GRU_OPT(nn.Module):
                 )
 
     def forward(self, x_serie, x_features):
+        sequence = x_serie.dim() == 4
+        if sequence:
+            batch, steps = x_serie.shape[:2]
+            x_serie = x_serie.reshape(batch * steps, *x_serie.shape[2:])
+            if x_features is not None:
+                x_features = x_features.reshape(batch * steps, x_features.shape[-1])
+
         half = self.film_dim // 2
         if x_features is not None:
             bg = self.film_generator(x_features)
@@ -83,5 +91,10 @@ class FiCRNN_GRU_OPT(nn.Module):
         for block in self.FiLM:
             h = block(h, gamma[:, i:i + block.out_ch], beta[:, i:i + block.out_ch])
             i += block.out_ch
-        out, _ = self.classifier[0](h.flatten(1).unsqueeze(1))  # GRU returns (output, hidden); window = length-1 sequence
+        h = h.flatten(1)
+        if sequence:
+            # GRU runs over the window sequence: (B, T, flat) -> (B, T, hidden) -> (B, T, K)
+            out, _ = self.classifier[0](h.reshape(batch, steps, -1))
+            return self.classifier[1:](out)
+        out, _ = self.classifier[0](h.unsqueeze(1))  # single window = length-1 sequence
         return self.classifier[1:](out[:, -1])

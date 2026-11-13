@@ -28,10 +28,10 @@ with patient-wise 10-fold cross-validation.
 Seizure windows make up only ~0.1–0.7% of CHB-MIT, so balanced accuracy and
 AUPRC (area under the precision-recall curve) are the primary metrics; plain accuracy is not informative here.
 
-| Metric            | FiCRNN_GRU_APEN (CHB-MIT) |
-|-------------------|-------------------------|
-| Balanced accuracy | 82.1% ± 12.1%           |
-| AUPRC             | 0.638 ± 0.233           |
+| Metric            | FiCRNN_GRU_APEN (CHB-MIT) | baseline      |
+|-------------------|---------------------------|---------------|
+| Balanced accuracy | 82.1% ± 12.1%             | 72.9% ± 14.1% |
+| AUPRC             | 0.638 ± 0.233             | 45.7 ± 22     |
 
 These numbers come from a subset of CHB-MIT: 10 patients with 23 EEG channels
 (chb01, chb02, chb03, chb05, chb06, chb07, chb08, chb10, chb23, chb24). Each

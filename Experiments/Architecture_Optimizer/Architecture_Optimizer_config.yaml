@@ -1,5 +1,5 @@
 n_trials: 250
-n_folds: 2
+n_folds: 4
 seed: 123
 batch_windows: 4096   # windows per training step; sequences per batch = batch_windows // sequence_len
 eval_batch_size: 4096   # windows per validation chunk (no gradients, so can be larger than batch_windows)
@@ -10,7 +10,7 @@ epochs: 8
 steps_per_epoch: 10
 sequence_len:   # windows per GRU sequence, searched on a log scale; 1 = no temporal context
   MIN: 32
-  MAX: 100
+  MAX: 200
 
 model: "ficrnn_gru"
 patients: ["chb01", "chb02", "chb03"]
@@ -21,7 +21,7 @@ lr:            # sampled on a log scale; ficrnn_gru reference uses 3e-4
   MAX: 3.0e-3
 
 classifier_hiden:
-  MIN: 4
+  MIN: 1
   MAX: 16
 
 film_layers:
@@ -29,13 +29,13 @@ film_layers:
   MAX: 15
 
 film_generator_layers:
-  MIN: 2
+  MIN: 1
   MAX: 8
 
 dropouts: [0.0, 0.1, 0.2, 0.3, 0.4]
 
 kernel_sizes:
-  MIN: 3
+  MIN: 2
   MAX: 30
 
 n_film:

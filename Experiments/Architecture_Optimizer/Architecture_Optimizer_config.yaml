@@ -1,4 +1,4 @@
-n_trials: 250
+n_trials: 300
 n_folds: 4
 seed: 123
 batch_windows: 4096   # windows per training step; sequences per batch = batch_windows // sequence_len
@@ -35,7 +35,7 @@ film_generator_layers:
 dropouts: [0.0, 0.1, 0.2, 0.3, 0.4]
 
 kernel_sizes:
-  MIN: 2
+  MIN: 1
   MAX: 30
 
 n_film:

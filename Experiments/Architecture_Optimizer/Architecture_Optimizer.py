@@ -130,9 +130,9 @@ def sample_architecture(trial, config):
         classifier_hiden=trial.suggest_int("classifier_hiden",
                                            config["classifier_hiden"]["MIN"],
                                            config["classifier_hiden"]["MAX"]),
-        dropouts_film_cnn=trial.suggest_categorical("dropout_film_cnn", config["dropouts"]),
+        dropouts_film_cnn=0.0,
         dropouts_classifier=trial.suggest_categorical("dropout_classifier", config["dropouts"]),
-        dropout_film_generator=trial.suggest_categorical("dropout_film_generator", config["dropouts"]),
+        dropout_film_generator=0.0,
     )
 
 def optimize(config, x, y, features):
